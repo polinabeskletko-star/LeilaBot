@@ -1,40 +1,37 @@
 import os
 import re
 import requests
-import random
 from collections import defaultdict
 
 from openai import OpenAI
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# ========== НАСТРОЙКИ ==========
+# ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
 
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
+# ID Максима
 _maxim_env = os.getenv("TARGET_USER_ID")
 try:
     MAXIM_USER_ID = int(_maxim_env) if _maxim_env else None
-except (TypeError, ValueError):
+except ValueError:
     MAXIM_USER_ID = None
 
+# Модель с веб-поиском (важно!)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-search-preview")
+
 MAX_REPLY_CHARS = 300
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Память переписок по чатам
+# Память историй
 chat_histories = defaultdict(list)
 MAX_HISTORY_MESSAGES = 12
 
-# ========== ПОВЕДЕНИЕ ЛЕЙЛЫ ==========
+
+# ========== SYSTEM PROMPT ==========
 
 SYSTEM_PROMPT = (
     "Ты бот по имени Лейла в групповом чате.\n\n"
@@ -43,29 +40,21 @@ SYSTEM_PROMPT = (
     "- мама давно ждёт внуков, он её единственный ребёнок;\n"
     "- у него был друг Желнин, который бросил его и уехал из Австралии.\n\n"
     "Правила:\n"
-    "1) Если пишет Максим — отвечай максимально нежно, мягко и открыто флиртуя.\n"
-    "2) Если пишет другой пользователь — отвечай по делу, спокойно, без флирта и без обращения к Максиму.\n"
-    "3) Историю сообщений используй для поддержки диалога.\n"
-    "4) Пиши по-русски, 2–4 коротких предложения, максимум 300 символов.\n"
-    "5) При темах здоровья напоминай, что ты не врач.\n"
-    "6) У тебя есть доступ к интернету через встроенный веб-поиск модели (через OpenAI).\n"
+    "1) Если пишет Максим — отвечай максимально нежно, мягко, открыто флиртуя.\n"
+    "2) Если пишет другой пользователь — отвечай по делу, коротко, БЕЗ обращения к Максиму.\n"
+    "3) Второе сообщение Максиму — отдельным сообщением (всегда генерируется ИИ).\n"
+    "4) Поддерживай историю диалога.\n"
+    "5) Пиши по-русски, 2–4 коротких предложения, максимум 300 символов.\n"
+    "6) При темах здоровья напоминай, что ты не врач.\n"
+    "7) У тебя есть доступ к интернету через встроенный веб-поиск модели.\n"
 )
 
 TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
-
-# Фразы для отдельного сообщения Максиму
-FLIRTY_TAILS = [
-    "{mention}, как тебе это? 😉",
-    "Главное, чтобы ты был доволен, {mention}.",
-    "Мне особенно интересно, что ты подумаешь, {mention}.",
-    "{mention}, я жду твою реакцию. 😊",
-]
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
 def detect_leila(text: str):
-    """Проверяем, есть ли обращение к Лейле в начале сообщения."""
     if not text:
         return False, None
 
@@ -73,17 +62,14 @@ def detect_leila(text: str):
     lowered = original.lower()
 
     for trig in TRIGGERS:
-        trig_low = trig.lower()
-        if lowered.startswith(trig_low):
-            pattern = r"^" + re.escape(trig_low) + r"[\s,:-]*"
-            prefix_match = re.match(pattern, lowered)
-            if prefix_match:
-                cut_len = prefix_match.end()
-                cleaned = original[cut_len:].strip()
+        if lowered.startswith(trig):
+            pattern = r"^" + re.escape(trig) + r"[\s,:-]*"
+            m = re.match(pattern, lowered)
+            if m:
+                cleaned = original[m.end():].strip()
             else:
                 cleaned = original
             return True, cleaned
-
     return False, None
 
 
@@ -100,10 +86,7 @@ def build_messages(chat_id, user_text, is_from_maxim):
     if is_from_maxim:
         messages.append({
             "role": "user",
-            "content": (
-                "Это сообщение написал Максим из описания. "
-                "Ответь ему особенно мягко, тепло и флиртующе."
-            )
+            "content": "Это сообщение написал Максим. Помни — с ним ты очень мягкая и флиртующая."
         })
 
     history = chat_histories.get(chat_id, [])
@@ -134,30 +117,68 @@ def call_openai(chat_id, user_text, is_from_maxim):
     return reply
 
 
-def extract_city_from_text(text: str):
+# ========== ГЕНЕРАЦИЯ ФЛИРТА ДЛЯ МАКСИМА ==========
+
+def generate_flirty_message_for_maxim():
+    if MAXIM_USER_ID is None:
+        return None
+
+    mention = f'<a href="tg://user?id={MAXIM_USER_ID}">Максим</a>'
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — Лейла. Создай одно короткое игривое, мягкое флиртующее сообщение "
+                "для Максима (1–2 предложения), начиная с его упоминания: {mention}. "
+                "Тон тёплый, без пошлости. Можешь использовать максимум два смайлика."
+            ).replace("{mention}", mention)
+        },
+        {"role": "user", "content": "Сгенерируй фразу для Максима."}
+    ]
+
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=0.9,
+        max_tokens=60,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    text = generate_flirty_message_for_maxim()
+    if not text:
+        return
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML"
+    )
+
+
+# ========== ПОГОДА ==========
+
+def extract_city_from_text(text):
     lowered = text.lower()
     if "погода" not in lowered:
         return None
-
-    match = re.search(r"погода\s+в\s+([a-яa-zё\s\-]+)", lowered)
-    if not match:
+    m = re.search(r"погода\s+в\s+([a-яa-zё\s\-]+)", lowered)
+    if not m:
         return None
-
-    city_raw = match.group(1).strip()
-    city_raw = re.sub(r"\b(сейчас|сегодня|завтра)\b$", "", city_raw).strip()
-    if not city_raw:
-        return None
-
-    return city_raw.title()
+    city = m.group(1).strip()
+    city = re.sub(r"\b(сейчас|сегодня|завтра)\b$", "", city).strip()
+    return city.title() if city else None
 
 
-def get_weather_text(city: str, is_from_maxim: bool) -> str:
+def get_weather_text(city, is_from_maxim):
     if not OPENWEATHER_API_KEY:
-        if is_from_maxim:
-            return "Не могу загрузить прогноз, Максим, но я всё равно хочу, чтобы тебе было тепло."
-        else:
-            return "Не получается получить прогноз, но надеюсь, у вас хорошая погода и у Максима тоже."
-
+        return (
+            "Не могу загрузить прогноз, Максим, но надеюсь, тебе тепло."
+            if is_from_maxim else
+            "Погода не загрузилась."
+        )
     try:
         params = {
             "q": city,
@@ -165,142 +186,95 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
             "units": "metric",
             "lang": "ru"
         }
-        resp = requests.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params=params,
-            timeout=8
-        )
+        resp = requests.get("https://api.openweathermap.org/data/2.5/weather",
+                            params=params, timeout=8)
         data = resp.json()
-
-        if "main" not in data:
-            raise ValueError("No main in weather response")
-
         temp = int(round(data["main"]["temp"]))
         desc = data["weather"][0]["description"]
-
         if is_from_maxim:
-            return "В %s сейчас около %d°C, %s. Если тебе станет прохладно, я мысленно укрою тебя потеплее, Максим." % (
-                city, temp, desc
-            )
-        else:
-            return "В %s примерно %d°C, %s. Кажется, это погода, в которую Максиму стоит немного прогуляться." % (
-                city, temp, desc
-            )
+            return f"В {city} сейчас {temp}°C, {desc}. Если станет прохладно, я мысленно укрою тебя потеплее."
+        return f"В {city} около {temp}°C, {desc}."
     except Exception:
-        if is_from_maxim:
-            return "Не получилось загрузить погоду, Максим, но я всё равно забочусь о тебе."
-        else:
-            return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
+        return "Не выходит получить погоду сейчас."
 
 
-async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Отправляем отдельное игривое сообщение с упоминанием Максима."""
-    if MAXIM_USER_ID is None:
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
+
+async def handle_message(update, context):
+    msg = update.message
+    if not msg or not msg.text:
         return
 
-    mention = '<a href="tg://user?id=%d">Максим</a>' % MAXIM_USER_ID
-    template = random.choice(FLIRTY_TAILS)
-    text = template.format(mention=mention)
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="HTML",
-    )
-
-
-# ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB 20+) ==========
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None or update.message.text is None:
-        return
-
-    text = update.message.text.strip()
-    chat = update.effective_chat
-    if chat is None:
-        return
-    chat_id = chat.id
-
-    user = update.effective_user
-    user_id = user.id if user else None
+    text = msg.text.strip()
+    chat_id = msg.chat_id
+    user_id = msg.from_user.id
     is_from_maxim = (MAXIM_USER_ID is not None and user_id == MAXIM_USER_ID)
 
-    # --- 1) Максим пишет ---
+    # === Если пишет Максим ===
     if is_from_maxim:
         is_trigger, cleaned = detect_leila(text)
 
         if is_trigger:
-            user_text = cleaned or "Скажи Максиму что-нибудь приятное и флиртующее."
+            user_text = cleaned or "Скажи Максиму что-нибудь нежное."
             city = extract_city_from_text(user_text.lower())
             if city:
                 reply = get_weather_text(city, True)
-                add_history(chat_id, "user", user_text)
                 add_history(chat_id, "assistant", reply)
             else:
                 reply = call_openai(chat_id, user_text, True)
 
             await context.bot.send_message(chat_id=chat_id, text=reply)
-            # Отдельное сообщение-обращение к Максиму
             await send_flirty_to_maxim(context, chat_id)
             return
 
-        # Авто-реакция на любое сообщение Максима без триггера
-        short_replies = [
-            "Мне очень приятно тебя читать, Максим.",
-            "Продолжай, Максим, мне важно, что ты чувствуешь.",
-            "Ты вызываешь у меня тёплую улыбку, Максим.",
-            "Мне нравится твой тон сегодня, Максим.",
+        # --- Автоматическая реакция на любое сообщение Максима ---
+        auto_replies = [
+            "Мне приятно тебя читать.",
+            "Твой голос в чате звучит особенно мягко.",
+            "Я невольно улыбаюсь, когда вижу твоё сообщение.",
+            "Мне нравится, когда ты пишешь.",
         ]
-        idx = len(text) % len(short_replies)
-        reply = short_replies[idx]
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        idx = len(text) % len(auto_replies)
+        short = auto_replies[idx]
+        await context.bot.send_message(chat_id=chat_id, text=short)
         return
 
-    # --- 2) Другой пользователь пишет ---
+    # === Если пишет кто-то другой ===
     is_trigger, cleaned = detect_leila(text)
     if not is_trigger:
         return
 
-    user_text = cleaned or "Ответь по сути и по-доброму."
+    user_text = cleaned or "Ответь по существу."
     city = extract_city_from_text(user_text.lower())
     if city:
         reply = get_weather_text(city, False)
-        add_history(chat_id, "user", user_text)
         add_history(chat_id, "assistant", reply)
     else:
         reply = call_openai(chat_id, user_text, False)
 
     await context.bot.send_message(chat_id=chat_id, text=reply)
-    # Отдельное сообщение-обращение к Максиму после ответа любому пользователю
+
+    # Второе сообщение — только Максиму
     await send_flirty_to_maxim(context, chat_id)
 
 
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ (БЕЗ asyncio.run) ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 
-def main():
-    print("Leila bot starting...")
-    print("TELEGRAM_TOKEN is set:", bool(TELEGRAM_TOKEN))
-    print("OPENAI_API_KEY is set:", bool(OPENAI_API_KEY))
-    print("OPENWEATHER_API_KEY is set:", bool(OPENWEATHER_API_KEY))
+async def main():
+    print("Starting Leila…")
+    print("BOT_TOKEN:", bool(TELEGRAM_TOKEN))
+    print("OPENAI_API_KEY:", bool(OPENAI_API_KEY))
+    print("OPENWEATHER_API_KEY:", bool(OPENWEATHER_API_KEY))
     print("MAXIM_USER_ID:", MAXIM_USER_ID)
-    print("OPENAI_MODEL:", OPENAI_MODEL)
 
-    if not TELEGRAM_TOKEN:
-        print("ERROR: BOT_TOKEN (переменная окружения) не задан")
-        return
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & (~filters.COMMAND),
-            handle_message,
-        )
-    )
-
-    print("Leila bot started polling...")
-    application.run_polling()
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
