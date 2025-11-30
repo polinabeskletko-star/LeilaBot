@@ -1,4 +1,4 @@
 pytz
 openai>=1.0.0
-python-telegram-bot>=20,<21
+python-telegram-bot[job-queue]==20.3
 requests
