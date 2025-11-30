@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+import random
 from collections import defaultdict
 
 from openai import OpenAI
@@ -52,6 +53,14 @@ SYSTEM_PROMPT = (
 )
 
 TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
+
+# Фразы для отдельного сообщения Максиму
+FLIRTY_TAILS = [
+    "{mention}, как тебе это? 😉",
+    "Главное, чтобы ты был доволен, {mention}.",
+    "Мне особенно интересно, что ты подумаешь, {mention}.",
+    "{mention}, я жду твою реакцию. 😊",
+]
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
@@ -126,8 +135,6 @@ def call_openai(chat_id, user_text, is_from_maxim):
     return reply
 
 
-# ---------- ПОГОДА ----------
-
 def extract_city_from_text(text: str):
     lowered = text.lower()
     if "погода" not in lowered:
@@ -187,6 +194,22 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
             return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
 
 
+async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Отправляем отдельное игривое сообщение с упоминанием Максима."""
+    if MAXIM_USER_ID is None:
+        return
+
+    mention = '<a href="tg://user?id=%d">Максим</a>' % MAXIM_USER_ID
+    template = random.choice(FLIRTY_TAILS)
+    text = template.format(mention=mention)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML",
+    )
+
+
 # ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB 20+) ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,9 +241,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply = call_openai(chat_id, user_text, True)
 
             await context.bot.send_message(chat_id=chat_id, text=reply)
+            # Отдельное сообщение-обращение к Максиму
+            await send_flirty_to_maxim(context, chat_id)
             return
 
-        # Авто-реакция на любое сообщение Максима
+        # Авто-реакция на любое сообщение Максима без триггера
         short_replies = [
             "Мне очень приятно тебя читать, Максим.",
             "Продолжай, Максим, мне важно, что ты чувствуешь.",
@@ -247,6 +272,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = call_openai(chat_id, user_text, False)
 
     await context.bot.send_message(chat_id=chat_id, text=reply)
+    # Отдельное сообщение-обращение к Максиму после ответа любому пользователю
+    await send_flirty_to_maxim(context, chat_id)
 
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ (БЕЗ asyncio.run) ==========
@@ -273,7 +300,6 @@ def main():
     )
 
     print("Leila bot started polling...")
-    # PTB сам создаёт и управляет event loop внутри
     application.run_polling()
 
 
