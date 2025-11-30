@@ -1,7 +1,6 @@
 import os
 import re
 import requests
-import random
 from collections import defaultdict
 
 from openai import OpenAI
@@ -25,6 +24,7 @@ try:
 except (TypeError, ValueError):
     MAXIM_USER_ID = None
 
+# Базовая модель; при желании можно переопределить через переменную окружения OPENAI_MODEL
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAX_REPLY_CHARS = 300
 
@@ -51,16 +51,7 @@ SYSTEM_PROMPT = (
     "6) У тебя есть доступ к интернету через встроенный веб-поиск модели (через OpenAI).\n"
 )
 
-
 TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
-
-# Фразы для отдельного сообщения Максиму
-FLIRTY_TAILS = [
-    "{mention}, как тебе это? 😉",
-    "Главное, чтобы ты был доволен, {mention}.",
-    "Мне особенно интересно, что ты подумаешь, {mention}.",
-    "{mention}, я жду твою реакцию. 😊",
-]
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
@@ -115,6 +106,7 @@ def build_messages(chat_id, user_text, is_from_maxim):
 
 
 def call_openai(chat_id, user_text, is_from_maxim):
+    """Основной ответ на вопрос (для Максима или других пользователей)."""
     messages = build_messages(chat_id, user_text, is_from_maxim)
 
     response = client.chat.completions.create(
@@ -133,6 +125,41 @@ def call_openai(chat_id, user_text, is_from_maxim):
         reply = reply[:MAX_REPLY_CHARS].rstrip()
 
     return reply
+
+
+def generate_flirty_message_for_maxim():
+    """Отдельный GPT-вызов для игривого сообщения Максиму (после основного ответа)."""
+    if MAXIM_USER_ID is None:
+        return None
+
+    mention = '<a href="tg://user?id=%d">Максим</a>' % MAXIM_USER_ID
+
+    system_text = (
+        "Ты — Лейла. Создай одно короткое игривое, мягкое, тёплое флиртующее сообщение "
+        "для Максима (1–2 коротких предложения, максимум 300 символов). "
+        "Сообщение должно начинаться с обращения к нему: {mention}. "
+        "Тон тёплый, без пошлости. Можно использовать максимум два смайлика."
+    ).replace("{mention}", mention)
+
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": "Сгенерируй одну флиртующую фразу для Максима."},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.9,
+            max_tokens=80,
+        )
+        text = response.choices[0].message.content.strip()
+        if len(text) > MAX_REPLY_CHARS:
+            text = text[:MAX_REPLY_CHARS].rstrip()
+        return text
+    except Exception:
+        # На случай ошибок у OpenAI — не роняем бота
+        return mention + ", я опять думаю о тебе."
 
 
 def extract_city_from_text(text: str):
@@ -184,24 +211,19 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
                 city, temp, desc
             )
         else:
-            return "В %s примерно %d°C, %s. Кажется, это погода, в которую Максиму стоит немного прогуляться." % (
-                city, temp, desc
-            )
+            return "В %s примерно %d°C, %s." % (city, temp, desc)
     except Exception:
         if is_from_maxim:
             return "Не получилось загрузить погоду, Максим, но я всё равно забочусь о тебе."
         else:
-            return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
+            return "Погода не загрузилась, но надеюсь, у вас всё равно хороший день."
 
 
 async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Отправляем отдельное игривое сообщение с упоминанием Максима."""
-    if MAXIM_USER_ID is None:
+    """Отправляем отдельное игривое сообщение, сгенерированное ИИ, с упоминанием Максима."""
+    text = generate_flirty_message_for_maxim()
+    if not text:
         return
-
-    mention = '<a href="tg://user?id=%d">Максим</a>' % MAXIM_USER_ID
-    template = random.choice(FLIRTY_TAILS)
-    text = template.format(mention=mention)
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -241,7 +263,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply = call_openai(chat_id, user_text, True)
 
             await context.bot.send_message(chat_id=chat_id, text=reply)
-            # Отдельное сообщение-обращение к Максиму
+            # Отдельное сообщение-обращение к Максиму (ИИ генерирует)
             await send_flirty_to_maxim(context, chat_id)
             return
 
