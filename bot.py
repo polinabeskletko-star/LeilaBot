@@ -25,7 +25,7 @@ try:
 except (TypeError, ValueError):
     MAXIM_USER_ID = None
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-browsing")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 MAX_REPLY_CHARS = 300
 
 client = OpenAI(api_key=OPENAI_API_KEY)
