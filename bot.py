@@ -2,6 +2,7 @@ import os
 import re
 import requests
 from collections import defaultdict
+from datetime import time
 
 from openai import OpenAI
 from telegram import Update
@@ -24,7 +25,7 @@ try:
 except (TypeError, ValueError):
     MAXIM_USER_ID = None
 
-# Базовая модель; при желании можно переопределить через переменную окружения OPENAI_MODEL
+# Модель можно при желании переопределить через переменную окружения OPENAI_MODEL
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAX_REPLY_CHARS = 300
 
@@ -33,6 +34,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Память переписок по чатам
 chat_histories = defaultdict(list)
 MAX_HISTORY_MESSAGES = 12
+
+# Последний чат, где появлялся Максим (для утренних сообщений)
+LAST_MAXIM_CHAT_ID = None
 
 # ========== ПОВЕДЕНИЕ ЛЕЙЛЫ ==========
 
@@ -158,8 +162,43 @@ def generate_flirty_message_for_maxim():
             text = text[:MAX_REPLY_CHARS].rstrip()
         return text
     except Exception:
-        # На случай ошибок у OpenAI — не роняем бота
         return mention + ", я опять думаю о тебе."
+
+
+def generate_morning_message_for_maxim():
+    """Генерируем очень тёплое флиртующее 'доброе утро и хорошего дня' для Максима."""
+    if MAXIM_USER_ID is None:
+        return None
+
+    mention = '<a href="tg://user?id=%d">Максим</a>' % MAXIM_USER_ID
+
+    system_text = (
+        "Ты — Лейла. Создай одно очень тёплое, нежное, флиртующее пожелание "
+        "доброго утра и хорошего дня для Максима. "
+        "1–3 коротких предложения, максимум 300 символов. "
+        "Сообщение должно начинаться с обращения к нему: {mention}. "
+        "Тон — заботливый, немного романтичный, без пошлости. "
+        "Можно использовать максимум два смайлика."
+    ).replace("{mention}", mention)
+
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": "Скажи ему доброе утро и пожелай прекрасного дня."},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.9,
+            max_tokens=100,
+        )
+        text = response.choices[0].message.content.strip()
+        if len(text) > MAX_REPLY_CHARS:
+            text = text[:MAX_REPLY_CHARS].rstrip()
+        return text
+    except Exception:
+        return mention + ", доброе утро. Пусть день будет мягким и тёплым, как наши беседы."
 
 
 def extract_city_from_text(text: str):
@@ -232,9 +271,31 @@ async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     )
 
 
+# ========== SCHEDULED JOB: УТРЕННЕЕ СООБЩЕНИЕ ==========
+
+async def morning_job(context: ContextTypes.DEFAULT_TYPE):
+    """Ежедневное сообщение 'доброе утро' Максиму в 8:00."""
+    global LAST_MAXIM_CHAT_ID
+    if MAXIM_USER_ID is None or LAST_MAXIM_CHAT_ID is None:
+        # Ещё не знаем, где Максим появляется — ничего не шлём
+        return
+
+    text = generate_morning_message_for_maxim()
+    if not text:
+        return
+
+    await context.bot.send_message(
+        chat_id=LAST_MAXIM_CHAT_ID,
+        text=text,
+        parse_mode="HTML",
+    )
+
+
 # ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB 20+) ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LAST_MAXIM_CHAT_ID
+
     if update.message is None or update.message.text is None:
         return
 
@@ -247,6 +308,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else None
     is_from_maxim = (MAXIM_USER_ID is not None and user_id == MAXIM_USER_ID)
+
+    # Если пишет Максим — запоминаем последний чат для утренних сообщений
+    if is_from_maxim:
+        LAST_MAXIM_CHAT_ID = chat_id
 
     # --- 1) Максим пишет ---
     if is_from_maxim:
@@ -314,11 +379,20 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Хендлер входящих сообщений
     application.add_handler(
         MessageHandler(
             filters.TEXT & (~filters.COMMAND),
             handle_message,
         )
+    )
+
+    # Ежедневный джоб на 08:00 (по времени сервера Fly.io)
+    # Если нужен именно Brisbane, можно потом добавить tzinfo через zoneinfo.
+    application.job_queue.run_daily(
+        morning_job,
+        time=time(hour=8, minute=0),
+        name="morning_message_for_maxim",
     )
 
     print("Leila bot started polling...")
