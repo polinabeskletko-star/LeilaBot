@@ -7,9 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
 # Work directory inside the container
 WORKDIR /app
 
-# Install system dependencies (empty for now, extend if you need)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# (Optional) update apt cache & clean, no install
+RUN apt-get update && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
