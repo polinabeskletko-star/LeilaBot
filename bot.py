@@ -21,7 +21,7 @@ OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 _maxim_env = os.getenv("TARGET_USER_ID")
 try:
     MAXIM_USER_ID = int(_maxim_env) if _maxim_env else None
-except ValueError:
+except (TypeError, ValueError):
     MAXIM_USER_ID = None
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -29,9 +29,11 @@ MAX_REPLY_CHARS = 300
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Память диалога по чатам
+# Память переписок по чатам
 chat_histories = defaultdict(list)
 MAX_HISTORY_MESSAGES = 12
+
+# ========== ПОВЕДЕНИЕ ЛЕЙЛЫ ==========
 
 SYSTEM_PROMPT = (
     "Ты бот по имени Лейла в групповом чате.\n\n"
@@ -55,6 +57,7 @@ TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
 def detect_leila(text: str):
+    """Проверяем, есть ли обращение к Лейле в начале сообщения."""
     if not text:
         return False, None
 
@@ -123,6 +126,8 @@ def call_openai(chat_id, user_text, is_from_maxim):
     return reply
 
 
+# ---------- ПОГОДА ----------
+
 def extract_city_from_text(text: str):
     lowered = text.lower()
     if "погода" not in lowered:
@@ -182,7 +187,7 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
             return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
 
 
-# ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB v20+) ==========
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB 20+) ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.message.text is None:
@@ -198,7 +203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else None
     is_from_maxim = (MAXIM_USER_ID is not None and user_id == MAXIM_USER_ID)
 
-    # 1) Максим пишет
+    # --- 1) Максим пишет ---
     if is_from_maxim:
         is_trigger, cleaned = detect_leila(text)
 
@@ -227,7 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=reply)
         return
 
-    # 2) Другой пользователь
+    # --- 2) Другой пользователь пишет ---
     is_trigger, cleaned = detect_leila(text)
     if not is_trigger:
         return
@@ -244,9 +249,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=chat_id, text=reply)
 
 
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ (БЕЗ asyncio.run) ==========
 
-async def main():
+def main():
     print("Leila bot starting...")
     print("TELEGRAM_TOKEN is set:", bool(TELEGRAM_TOKEN))
     print("OPENAI_API_KEY is set:", bool(OPENAI_API_KEY))
@@ -268,9 +273,9 @@ async def main():
     )
 
     print("Leila bot started polling...")
-    await application.run_polling()
+    # PTB сам создаёт и управляет event loop внутри
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
