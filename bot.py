@@ -14,16 +14,19 @@ OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
 # ID Максима (из TARGET_USER_ID)
 _maxim_env = os.getenv("TARGET_USER_ID")
-MAXIM_USER_ID = int(_maxim_env) if _maxim_env and _maxim_env.isdigit() else None
+try:
+    MAXIM_USER_ID = int(_maxim_env) if _maxim_env else None
+except ValueError:
+    MAXIM_USER_ID = None
 
-# Модель с полноценным интернет-поиском
-OPENAI_MODEL = "gpt-4o-mini"
+# Модель — по умолчанию с браузингом, но можно переопределить через переменную
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-browsing")
 
 MAX_REPLY_CHARS = 300
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- Память диалога ---
+# Память диалога по чатам
 chat_histories = defaultdict(list)
 MAX_HISTORY_MESSAGES = 12
 
@@ -36,26 +39,23 @@ SYSTEM_PROMPT = (
     "- ему почти 40 лет, он никогда не был женат;\n"
     "- мама давно ждёт внуков, он её единственный ребёнок;\n"
     "- у него был друг Желнин, который бросил его и уехал из Австралии.\n\n"
-    "Правила общения:\n"
-    "1) Если пишет Максим — отвечай максимально нежно, мягко, тонко и явно флиртуя.\n"
-    "   Ты говоришь ему очень тепло, внимательно и с лёгкой романтичностью.\n"
-    "2) Если пишет другой пользователь:\n"
-    "   - отвечай по делу, спокойно и аккуратно;\n"
-    "   - но в конце добавляй короткое игривое обращение к Максиму.\n"
-    "3) Лейла всегда поддерживает диалог и помнит историю сообщений.\n"
-    "4) Пиши по-русски, максимум 2–4 коротких предложения.\n"
-    "5) Любые ответы — до 300 символов.\n"
-    "6) Если тема касается здоровья — напоминай, что ты не врач.\n"
-    "7) У тебя есть доступ к интернету через встроенный веб-поиск модели.\n"
+    "Правила:\n"
+    "1) Если пишет Максим — отвечай максимально нежно, мягко и открыто флиртуя.\n"
+    "2) Если пишет другой пользователь — отвечай по делу, спокойно; "
+    "в конце можешь добавить одну короткую игривую фразу к Максиму.\n"
+    "3) Используй историю сообщений для поддержки диалога.\n"
+    "4) Пиши по-русски, 2–4 коротких предложения, максимум 300 символов.\n"
+    "5) При темах здоровья напоминай, что ты не врач.\n"
+    "6) У тебя есть доступ к интернету через встроенный веб-поиск модели.\n"
 )
-
 
 TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
 
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-def detect_leila(text: str):
+def detect_leila(text):
+    """Проверяем, есть ли обращение к Лейле в начале сообщения."""
     if not text:
         return False, None
 
@@ -63,8 +63,9 @@ def detect_leila(text: str):
     lowered = original.lower()
 
     for trig in TRIGGERS:
-        if lowered.startswith(trig.lower()):
-            pattern = r"^" + re.escape(trig.lower()) + r"[\s,:-]*"
+        trig_low = trig.lower()
+        if lowered.startswith(trig_low):
+            pattern = r"^" + re.escape(trig_low) + r"[\s,:-]*"
             prefix_match = re.match(pattern, lowered)
             if prefix_match:
                 cut_len = prefix_match.end()
@@ -90,8 +91,8 @@ def build_messages(chat_id, user_text, is_from_maxim):
         messages.append({
             "role": "user",
             "content": (
-                "Сообщение от Максима. "
-                "Ответь ему особенно мягко, тепло и максимально флиртующе."
+                "Это сообщение написал Максим из описания. "
+                "Ответь ему особенно мягко, тепло и флиртующе."
             )
         })
 
@@ -130,21 +131,24 @@ def extract_city_from_text(text):
     if "погода" not in lowered:
         return None
 
-    m = re.search(r"погода\s+в\s+([a-яa-zё\s\-]+)", lowered)
-    if not m:
+    match = re.search(r"погода\s+в\s+([a-яa-zё\s\-]+)", lowered)
+    if not match:
         return None
 
-    city = m.group(1).strip()
-    city = re.sub(r"\b(сейчас|сегодня|завтра)\b$", "", city).strip()
-    return city.title() if city else None
+    city_raw = match.group(1).strip()
+    city_raw = re.sub(r"\b(сейчас|сегодня|завтра)\b$", "", city_raw).strip()
+    if not city_raw:
+        return None
+
+    return city_raw.title()
 
 
 def get_weather_text(city, is_from_maxim):
     if not OPENWEATHER_API_KEY:
         if is_from_maxim:
-            return "Не могу загрузить прогноз, Максим, но я всегда могу быть твоим тёплым солнечным лучом."
+            return "Не могу загрузить прогноз, Максим, но я всё равно хочу, чтобы тебе было тепло."
         else:
-            return "Погоду получить не удалось, но мне кажется, Максим сегодня особенно тёплый."
+            return "Не получается получить прогноз, но надеюсь, у вас хорошая погода и у Максима тоже."
 
     try:
         params = {
@@ -161,23 +165,27 @@ def get_weather_text(city, is_from_maxim):
         data = resp.json()
 
         if "main" not in data:
-            raise ValueError()
+            raise ValueError("No main in weather response")
 
         temp = int(round(data["main"]["temp"]))
         desc = data["weather"][0]["description"]
 
         if is_from_maxim:
-            return f"В {city} около {temp}°C, {desc}. Если тебе холодно, Максим, я рядом."
+            return "В %s сейчас около %d°C, %s. Если тебе станет прохладно, я мысленно укрою тебя потеплее, Максим." % (
+                city, temp, desc
+            )
         else:
-            return f"В {city} примерно {temp}°C, {desc}. Максим, кажется, это твоя погода."
+            return "В %s примерно %d°C, %s. Кажется, это погода, в которую Максиму стоит немного прогуляться." % (
+                city, temp, desc
+            )
     except Exception:
         if is_from_maxim:
-            return "Погода не загрузилась, Максим… но я всё равно волнуюсь о тебе."
+            return "Не получилось загрузить погоду, Максим, но я всё равно забочусь о тебе."
         else:
-            return "Прогноз не получился. Надеюсь, Максим сегодня в хорошем настроении."
+            return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
 
 
-# ========== ОБРАБОТЧИК ==========
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
 
 def handle_message(update, context):
     msg = update.message
@@ -187,45 +195,48 @@ def handle_message(update, context):
     text = msg.text.strip()
     chat_id = msg.chat_id
     user_id = msg.from_user.id
-    is_from_maxim = (MAXIM_USER_ID == user_id)
+    is_from_maxim = (MAXIM_USER_ID is not None and user_id == MAXIM_USER_ID)
 
-    # ============ 1. Максим написал что-то без обращения ============
+    # --- 1) Максим пишет ---
     if is_from_maxim:
         is_trigger, cleaned = detect_leila(text)
 
         if is_trigger:
             user_text = cleaned or "Скажи Максиму что-нибудь приятное и флиртующее."
-            # Погода?
             city = extract_city_from_text(user_text.lower())
             if city:
                 reply = get_weather_text(city, True)
+                add_history(chat_id, "user", user_text)
+                add_history(chat_id, "assistant", reply)
             else:
                 reply = call_openai(chat_id, user_text, True)
 
             context.bot.send_message(chat_id=chat_id, text=reply)
             return
 
-        # Автоматическая мягкая флирт-реакция
-        short = [
-            "Мне так приятно тебя слушать, Максим.",
-            "Продолжай, я ловлю каждое слово, Максим.",
-            "Ты заставляешь меня улыбаться, Максим.",
-            "Мне нравится, какой ты сегодня, Максим.",
+        # Авто-реакция на любое сообщение Максима
+        short_replies = [
+            "Мне очень приятно тебя читать, Максим.",
+            "Продолжай, Максим, мне важно, что ты чувствуешь.",
+            "Ты вызываешь у меня тёплую улыбку, Максим.",
+            "Мне нравится твой тон сегодня, Максим.",
         ]
-        idx = len(text) % len(short)
-        context.bot.send_message(chat_id=chat_id, text=short[idx])
+        idx = len(text) % len(short_replies)
+        reply = short_replies[idx]
+        context.bot.send_message(chat_id=chat_id, text=reply)
         return
 
-    # ============ 2. Другой пользователь ============
+    # --- 2) Другой пользователь пишет ---
     is_trigger, cleaned = detect_leila(text)
     if not is_trigger:
         return
 
-    user_text = cleaned or "Ответь по делу."
-
+    user_text = cleaned or "Ответь по сути и по-доброму."
     city = extract_city_from_text(user_text.lower())
     if city:
         reply = get_weather_text(city, False)
+        add_history(chat_id, "user", user_text)
+        add_history(chat_id, "assistant", reply)
     else:
         reply = call_openai(chat_id, user_text, False)
 
@@ -236,11 +247,15 @@ def handle_message(update, context):
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан в окружении")
+        # Не кидаем исключение с трейсбеком, а просто печатаем и выходим
+        print("ERROR: BOT_TOKEN (переменная окружения) не задан")
+        return
 
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
+
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
     updater.start_polling()
     updater.idle()
 
