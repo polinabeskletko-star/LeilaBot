@@ -4,7 +4,13 @@ import requests
 from collections import defaultdict
 
 from openai import OpenAI
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # ========== НАСТРОЙКИ ==========
 
@@ -12,30 +18,20 @@ TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-# ID Максима (из TARGET_USER_ID)
 _maxim_env = os.getenv("TARGET_USER_ID")
 try:
     MAXIM_USER_ID = int(_maxim_env) if _maxim_env else None
 except ValueError:
     MAXIM_USER_ID = None
 
-# Модель — можно переопределить через переменную
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # можно потом вернуть gpt-4o-mini-browsing
-
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MAX_REPLY_CHARS = 300
-
-# Проверки ключей перед созданием клиента OpenAI
-if not OPENAI_API_KEY:
-    print("ERROR: OPENAI_API_KEY не задан в переменных окружения")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Память диалога по чатам
 chat_histories = defaultdict(list)
 MAX_HISTORY_MESSAGES = 12
-
-
-# ========== ПОВЕДЕНИЕ ЛЕЙЛЫ ==========
 
 SYSTEM_PROMPT = (
     "Ты бот по имени Лейла в групповом чате.\n\n"
@@ -58,8 +54,7 @@ TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-def detect_leila(text):
-    """Проверяем, есть ли обращение к Лейле в начале сообщения."""
+def detect_leila(text: str):
     if not text:
         return False, None
 
@@ -128,9 +123,7 @@ def call_openai(chat_id, user_text, is_from_maxim):
     return reply
 
 
-# ========== ПОГОДА ==========
-
-def extract_city_from_text(text):
+def extract_city_from_text(text: str):
     lowered = text.lower()
     if "погода" not in lowered:
         return None
@@ -147,7 +140,7 @@ def extract_city_from_text(text):
     return city_raw.title()
 
 
-def get_weather_text(city, is_from_maxim):
+def get_weather_text(city: str, is_from_maxim: bool) -> str:
     if not OPENWEATHER_API_KEY:
         if is_from_maxim:
             return "Не могу загрузить прогноз, Максим, но я всё равно хочу, чтобы тебе было тепло."
@@ -189,19 +182,23 @@ def get_weather_text(city, is_from_maxim):
             return "Погода не загрузилась, но я надеюсь, что у Максима сегодня тёплый день."
 
 
-# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ (ASYNC, PTB v20+) ==========
 
-def handle_message(update, context):
-    msg = update.message
-    if msg is None or msg.text is None:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.message.text is None:
         return
 
-    text = msg.text.strip()
-    chat_id = msg.chat_id
-    user_id = msg.from_user.id
+    text = update.message.text.strip()
+    chat = update.effective_chat
+    if chat is None:
+        return
+    chat_id = chat.id
+
+    user = update.effective_user
+    user_id = user.id if user else None
     is_from_maxim = (MAXIM_USER_ID is not None and user_id == MAXIM_USER_ID)
 
-    # --- 1) Максим пишет ---
+    # 1) Максим пишет
     if is_from_maxim:
         is_trigger, cleaned = detect_leila(text)
 
@@ -215,7 +212,7 @@ def handle_message(update, context):
             else:
                 reply = call_openai(chat_id, user_text, True)
 
-            context.bot.send_message(chat_id=chat_id, text=reply)
+            await context.bot.send_message(chat_id=chat_id, text=reply)
             return
 
         # Авто-реакция на любое сообщение Максима
@@ -227,10 +224,10 @@ def handle_message(update, context):
         ]
         idx = len(text) % len(short_replies)
         reply = short_replies[idx]
-        context.bot.send_message(chat_id=chat_id, text=reply)
+        await context.bot.send_message(chat_id=chat_id, text=reply)
         return
 
-    # --- 2) Другой пользователь пишет ---
+    # 2) Другой пользователь
     is_trigger, cleaned = detect_leila(text)
     if not is_trigger:
         return
@@ -244,38 +241,36 @@ def handle_message(update, context):
     else:
         reply = call_openai(chat_id, user_text, False)
 
-    context.bot.send_message(chat_id=chat_id, text=reply)
+    await context.bot.send_message(chat_id=chat_id, text=reply)
 
 
-# ========== ЗАПУСК ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 
-def main():
+async def main():
     print("Leila bot starting...")
     print("TELEGRAM_TOKEN is set:", bool(TELEGRAM_TOKEN))
     print("OPENAI_API_KEY is set:", bool(OPENAI_API_KEY))
     print("OPENWEATHER_API_KEY is set:", bool(OPENWEATHER_API_KEY))
     print("MAXIM_USER_ID:", MAXIM_USER_ID)
+    print("OPENAI_MODEL:", OPENAI_MODEL)
 
     if not TELEGRAM_TOKEN:
         print("ERROR: BOT_TOKEN (переменная окружения) не задан")
         return
 
-    try:
-        updater = Updater(TELEGRAM_TOKEN, use_context=True)
-    except Exception as e:
-        print("ERROR: failed to create Updater:", repr(e))
-        return
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    dp = updater.dispatcher
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & (~filters.COMMAND),
+            handle_message,
+        )
+    )
 
-    try:
-        updater.start_polling()
-        print("Leila bot started polling...")
-        updater.idle()
-    except Exception as e:
-        print("ERROR: exception in polling loop:", repr(e))
+    print("Leila bot started polling...")
+    await application.run_polling()
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
