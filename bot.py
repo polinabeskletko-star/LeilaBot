@@ -17,7 +17,7 @@ _maxim_env = os.getenv("TARGET_USER_ID")
 MAXIM_USER_ID = int(_maxim_env) if _maxim_env and _maxim_env.isdigit() else None
 
 # Модель с полноценным интернет-поиском
-OPENAI_MODEL = "gpt-4o-mini-browsing"
+OPENAI_MODEL = "gpt-4o-mini"
 
 MAX_REPLY_CHARS = 300
 
