@@ -1,4 +1,4 @@
-python-telegram-bot==21.4
 pytz
-openai
+openai>=1.0.0
+python-telegram-bot>=20,<21
 requests
