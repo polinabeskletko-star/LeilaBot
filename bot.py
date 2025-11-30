@@ -19,10 +19,14 @@ try:
 except ValueError:
     MAXIM_USER_ID = None
 
-# Модель — по умолчанию с браузингом, но можно переопределить через переменную
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini-browsing")
+# Модель — можно переопределить через переменную
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # можно потом вернуть gpt-4o-mini-browsing
 
 MAX_REPLY_CHARS = 300
+
+# Проверки ключей перед созданием клиента OpenAI
+if not OPENAI_API_KEY:
+    print("ERROR: OPENAI_API_KEY не задан в переменных окружения")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -46,7 +50,7 @@ SYSTEM_PROMPT = (
     "3) Используй историю сообщений для поддержки диалога.\n"
     "4) Пиши по-русски, 2–4 коротких предложения, максимум 300 символов.\n"
     "5) При темах здоровья напоминай, что ты не врач.\n"
-    "6) У тебя есть доступ к интернету через встроенный веб-поиск модели.\n"
+    "6) У тебя есть доступ к интернету через встроенный веб-поиск модели (через OpenAI).\n"
 )
 
 TRIGGERS = ["лейла", "leila", "@лейла", "@leila"]
@@ -246,18 +250,31 @@ def handle_message(update, context):
 # ========== ЗАПУСК ==========
 
 def main():
+    print("Leila bot starting...")
+    print("TELEGRAM_TOKEN is set:", bool(TELEGRAM_TOKEN))
+    print("OPENAI_API_KEY is set:", bool(OPENAI_API_KEY))
+    print("OPENWEATHER_API_KEY is set:", bool(OPENWEATHER_API_KEY))
+    print("MAXIM_USER_ID:", MAXIM_USER_ID)
+
     if not TELEGRAM_TOKEN:
-        # Не кидаем исключение с трейсбеком, а просто печатаем и выходим
         print("ERROR: BOT_TOKEN (переменная окружения) не задан")
         return
 
-    updater = Updater(TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    try:
+        updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    except Exception as e:
+        print("ERROR: failed to create Updater:", repr(e))
+        return
 
+    dp = updater.dispatcher
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    updater.start_polling()
-    updater.idle()
+    try:
+        updater.start_polling()
+        print("Leila bot started polling...")
+        updater.idle()
+    except Exception as e:
+        print("ERROR: exception in polling loop:", repr(e))
 
 
 if __name__ == "__main__":
