@@ -2,7 +2,7 @@ app = "leilabot"
 primary_region = "syd"
 
 [build]
-  # Dockerfile used by default
+  # Dockerfile in the repo will be used automatically
 
 [env]
   # no non-secret env vars here
