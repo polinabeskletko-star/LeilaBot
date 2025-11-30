@@ -2,10 +2,10 @@ app = "leilabot"
 primary_region = "syd"
 
 [build]
-  # Dockerfile in the repo will be used automatically
+  # Dockerfile is used automatically
 
 [env]
-  # no non-secret env vars here
+  # non-secret env vars (leave empty)
 
 [processes]
   app = "python bot.py"
