@@ -201,21 +201,90 @@ def generate_morning_message_for_maxim():
         return mention + ", доброе утро. Пусть день будет мягким и тёплым, как наши беседы."
 
 
+def generate_short_reaction_for_maxim(original_text: str) -> str:
+    """
+    Короткая автоматическая реакция на любое сообщение Максима без триггера.
+    1–2 предложения, до ~200 символов, мягкий флирт, без пошлости.
+    """
+    if MAXIM_USER_ID is None:
+        return "Мне приятно тебя читать, Максим."
+
+    system_text = (
+        "Ты — Лейла. Твоя задача — дать ОДНУ короткую реакцию на сообщение Максима. "
+        "1–2 коротких предложения, до 200 символов. "
+        "Тон мягкий, тёплый, немного флиртующий, без пошлости. "
+        "Не упоминай, что ты бот или ИИ."
+    )
+
+    user_content = (
+        "Сообщение Максима: «%s».\n"
+        "Ответь одной короткой фразой-реакцией." % original_text
+    )
+
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.9,
+            max_tokens=80,
+        )
+        text = response.choices[0].message.content.strip()
+        if len(text) > 200:
+            text = text[:200].rstrip()
+        return text
+    except Exception:
+        return "Ты сейчас очень милый, Максим."
+
+
+# ====== НОВАЯ, БОЛЕЕ УМНАЯ ЛОГИКА ВЫБОРА ГОРОДА ======
+
 def extract_city_from_text(text: str):
+    """
+    Пытаемся вытащить город из произвольной фразы.
+    Поддерживаем варианты:
+    - 'погода в брисбене'
+    - 'Лейла, погода Сидней'
+    - 'Лейла какая погода в moscow сегодня'
+    - 'Leila weather in Sydney'
+    - 'Leila, weather Dubai now'
+    Если город однозначно не найден — возвращаем 'Brisbane' как мягкий дефолт.
+    """
     lowered = text.lower()
-    if "погода" not in lowered:
+
+    # Если вообще нет слова погода / weather — это не запрос про погоду
+    if ("погода" not in lowered) and ("weather" not in lowered):
         return None
 
-    match = re.search(r"погода\s+в\s+([a-яa-zё\s\-]+)", lowered)
-    if not match:
-        return None
+    # Набор шаблонов, от более строгих к более свободным
+    patterns = [
+        r"погода\s+в\s+([a-яa-zё\s\-]+)",      # погода в брисбене
+        r"погода\s+([a-яa-zё\s\-]+)",          # погода брисбен
+        r"weather\s+in\s+([a-z\s\-]+)",        # weather in sydney
+        r"weather\s+([a-z\s\-]+)",             # weather sydney
+    ]
 
-    city_raw = match.group(1).strip()
-    city_raw = re.sub(r"\b(сейчас|сегодня|завтра)\b$", "", city_raw).strip()
-    if not city_raw:
-        return None
+    for pat in patterns:
+        m = re.search(pat, lowered)
+        if m:
+            city_raw = m.group(1)
+            # убираем знаки препинания и лишние хвосты
+            city_raw = city_raw.strip(" ?!.,")
+            city_raw = re.sub(
+                r"\b(сейчас|сегодня|завтра|now|today|tomorrow)\b",
+                "",
+                city_raw,
+            ).strip()
+            if city_raw:
+                return city_raw.title()
 
-    return city_raw.title()
+    # Если ничего не нашли, но явно спрашивали про погоду —
+    # считаем, что имели в виду Брисбен
+    return "Brisbane"
 
 
 def get_weather_text(city: str, is_from_maxim: bool) -> str:
@@ -239,8 +308,11 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
         )
         data = resp.json()
 
-        if "main" not in data:
-            raise ValueError("No main in weather response")
+        # Отладочный лог, чтобы видеть реальные ответы от OpenWeather
+        print(f"WEATHER DEBUG city={city!r} response={data!r}")
+
+        if "main" not in data or "weather" not in data:
+            raise ValueError("No main/weather in weather response")
 
         temp = int(round(data["main"]["temp"]))
         desc = data["weather"][0]["description"]
@@ -251,7 +323,8 @@ def get_weather_text(city: str, is_from_maxim: bool) -> str:
             )
         else:
             return "В %s примерно %d°C, %s." % (city, temp, desc)
-    except Exception:
+    except Exception as e:
+        print(f"WEATHER ERROR for city={city!r}: {e!r}")
         if is_from_maxim:
             return "Не получилось загрузить погоду, Максим, но я всё равно забочусь о тебе."
         else:
@@ -274,7 +347,7 @@ async def send_flirty_to_maxim(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 # ========== SCHEDULED JOB: УТРЕННЕЕ СООБЩЕНИЕ ==========
 
 async def morning_job(context: ContextTypes.DEFAULT_TYPE):
-    """Ежедневное сообщение 'доброе утро' Максиму в 8:00."""
+    """Ежедневное сообщение 'доброе утро' Максиму в 8:00 (по времени сервера)."""
     global LAST_MAXIM_CHAT_ID
     if MAXIM_USER_ID is None or LAST_MAXIM_CHAT_ID is None:
         # Ещё не знаем, где Максим появляется — ничего не шлём
@@ -332,16 +405,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_flirty_to_maxim(context, chat_id)
             return
 
-        # Авто-реакция на любое сообщение Максима без триггера
-        short_replies = [
-            "Мне очень приятно тебя читать, Максим.",
-            "Продолжай, Максим, мне важно, что ты чувствуешь.",
-            "Ты вызываешь у меня тёплую улыбку, Максим.",
-            "Мне нравится твой тон сегодня, Максим.",
-        ]
-        idx = len(text) % len(short_replies)
-        reply = short_replies[idx]
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        # Авто-реакция на любое сообщение Максима без триггера — теперь через ИИ
+        short_reply = generate_short_reaction_for_maxim(text)
+        await context.bot.send_message(chat_id=chat_id, text=short_reply)
         return
 
     # --- 2) Другой пользователь пишет ---
@@ -388,7 +454,6 @@ def main():
     )
 
     # Ежедневный джоб на 08:00 (по времени сервера Fly.io)
-    # Если нужен именно Brisbane, можно потом добавить tzinfo через zoneinfo.
     application.job_queue.run_daily(
         morning_job,
         time=time(hour=8, minute=0),
