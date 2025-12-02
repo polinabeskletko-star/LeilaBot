@@ -138,6 +138,7 @@ async def fetch_weather() -> Optional[str]:
             resp.raise_for_status()
             data = resp.json()
         except Exception:
+        # если что-то пошло не так — просто вернём None
             return None
 
     try:
@@ -179,7 +180,9 @@ async def ask_openai(prompt: str, history_key: str, from_maxim: bool) -> str:
 # ========== ХЕНДЛЕРЫ ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("Привет, я Лейла. Здесь, чтобы особенно портить жизнь Максиму своим обаянием.")
+    await update.effective_message.reply_text(
+        "Привет, я Лейла. Здесь, чтобы особенно портить жизнь Максиму своим обаянием."
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -189,9 +192,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = msg.text or ""
+    text_lower = text.lower()
     from_max = is_maxim(update)
     history_key = str(chat.id)
 
+    # ---- ФИЛЬТР РЕАКЦИЙ В ГРУППЕ ----
+    # В группе Лейла отвечает, только если:
+    # - пишет сам Максим
+    # - или сообщение явно обращено к Лейле (имя/ник)
+    # - или сообщение — ответ на её сообщение
+    if chat.type in ("group", "supergroup"):
+        # имя/username бота
+        bot_username = context.bot.username
+        if not bot_username:
+            me = await context.bot.get_me()
+            bot_username = me.username or ""
+        bot_username_lower = bot_username.lower()
+
+        mentioned_by_name = "лейла" in text_lower
+        mentioned_by_username = bot_username_lower and f"@{bot_username_lower}" in text_lower
+
+        reply_to_bot = (
+            msg.reply_to_message is not None
+            and msg.reply_to_message.from_user is not None
+            and msg.reply_to_message.from_user.id == context.bot.id
+        )
+
+        if not (from_max or mentioned_by_name or mentioned_by_username or reply_to_bot):
+            # Никто Лейлу не звал, и это не Максим — просто игнорируем сообщение
+            return
+
+    # В личке можно отвечать на всё
     reply = await ask_openai(text, history_key, from_max)
     await msg.reply_text(reply)
 
