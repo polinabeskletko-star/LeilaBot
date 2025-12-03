@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== НАСТРОЙКИ ==========
+# ========== НАСТРОЙКИ ============
 
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 
