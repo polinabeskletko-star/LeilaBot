@@ -511,54 +511,11 @@ async def handle_weather_query(text: str) -> Optional[str]:
 # ========== ВИКИПЕДИЯ - СЕРВИС ==========
 
 class WikipediaService:
-    """Сервис для работы с Wikipedia"""
+    """Сервис для работы с Wikipedia (только по команде /wiki)"""
     
     def __init__(self):
         self.summary_cache = {}
         self.search_cache = {}
-        
-        self.wiki_keywords = [
-            "кто такой", "кто такая", "что такое", "что значит",
-            "расскажи о", "расскажите о", "информация о", 
-            "что такое", "кто это", "что это",
-            "биография", "история", "определение",
-            "википедия", "вики", "wikipedia"
-        ]
-    
-    def is_wikipedia_query(self, text: str) -> bool:
-        """Определяет, является ли запрос поиском в Википедии"""
-        text_lower = text.lower()
-        
-        for keyword in self.wiki_keywords:
-            if keyword in text_lower:
-                return True
-        
-        if any(word[0].isupper() for word in text.split() if len(word) > 2):
-            if len(text.split()) <= 5:
-                return True
-        
-        return False
-    
-    def extract_search_term(self, text: str) -> str:
-        """Извлекает поисковый термин из запроса"""
-        text_lower = text.lower()
-        
-        for keyword in self.wiki_keywords:
-            text_lower = text_lower.replace(keyword, "")
-        
-        stop_words = ["пожалуйста", "мне", "расскажи", "расскажите", "что", "кто", "такое", "такая", "это"]
-        for word in stop_words:
-            text_lower = text_lower.replace(word, "")
-        
-        search_term = re.sub(r'[^\w\s]', '', text_lower).strip()
-        
-        if not search_term:
-            words = text.split()
-            capitalized = [word for word in words if word and word[0].isupper()]
-            if capitalized:
-                search_term = " ".join(capitalized[:3])
-        
-        return search_term
     
     async def search_wikipedia(self, query: str, sentences: int = 3) -> Optional[Tuple[str, str, str]]:
         """Ищет информацию в Википедии"""
@@ -614,32 +571,6 @@ class WikipediaService:
             
         except Exception as e:
             logger.error(f"Ошибка поиска в Википедии для '{query}': {e}")
-        
-        return None
-    
-    async def get_wikipedia_answer(self, text: str, user_name: str, is_maxim: bool) -> Optional[str]:
-        """Получает ответ из Википедии"""
-        search_term = self.extract_search_term(text)
-        
-        if not search_term or len(search_term) < 2:
-            return None
-        
-        result = await self.search_wikipedia(search_term, sentences=4)
-        
-        if result:
-            summary, title, url = result
-            
-            if is_maxim:
-                response = f"💖 Вот что я нашла о '{title}', мой дорогой:\n\n"
-                response += f"📚 {summary}\n\n"
-                response += f"🔗 Подробнее: {url}\n"
-                response += "Надеюсь, эта информация будет полезной! 💖"
-            else:
-                response = f"📚 Информация о '{title}' из Википедии:\n\n"
-                response += f"{summary}\n\n"
-                response += f"🔗 Ссылка: {url}"
-            
-            return response
         
         return None
 
@@ -1063,14 +994,12 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if is_maxim:
                 await update.message.reply_text(
                     "Милый, напиши что искать после команды /wiki 😊\n"
-                    "Например: /wiki кошки или /wiki Эйнштейн\n\n"
-                    "Или просто спроси меня в чате: 'Кто такой Эйнштейн?'"
+                    "Например: /wiki кошки или /wiki Эйнштейн"
                 )
             else:
                 await update.message.reply_text(
                     "Напишите что искать после команды /wiki\n"
-                    "Например: /wiki кошки\n\n"
-                    "Или спросите в чате: 'Что такое ИИ?'"
+                    "Например: /wiki кошки"
                 )
             return
         
@@ -1156,40 +1085,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             
             if not (is_maxim or mentioned_by_name or mentioned_by_username or reply_to_bot):
-                return
-        
-        if wiki_service.is_wikipedia_query(text):
-            wiki_answer = await wiki_service.get_wikipedia_answer(text, user_name, is_maxim)
-            
-            if wiki_answer:
-                logger.info(f"📚 Ответ из Википедии для {user_name}")
-                
-                if len(wiki_answer) > 4000:
-                    await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=wiki_answer[:4000],
-                        disable_web_page_preview=True
-                    )
-                    await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=wiki_answer[4000:],
-                        disable_web_page_preview=True
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=wiki_answer,
-                        disable_web_page_preview=True
-                    )
-                
-                if is_maxim and random.random() < 0.5:
-                    follow_up = random.choice([
-                        "\n\nИнтересно было узнать об этом вместе с тобой! 😊",
-                        "\n\nНадеюсь, эта информация была полезной для тебя! 💖",
-                        "\n\nВсегда рада помочь тебе узнать что-то новое! 🌟"
-                    ])
-                    await context.bot.send_message(chat_id=chat.id, text=follow_up)
-                
                 return
         
         memory = get_conversation_memory(user.id, chat.id)
@@ -1366,7 +1261,7 @@ def main() -> None:
     logger.info(f"👤 Максим ID: {MAXIM_ID}")
     logger.info(f"🤖 DeepSeek доступен: {'✅' if client else '❌'}")
     logger.info(f"🌤️ Погодный сервис: {'✅' if OPENWEATHER_API_KEY else '❌'}")
-    logger.info(f"📚 Википедия доступна: ✅")
+    logger.info(f"📚 Википедия доступна: ✅ (только по команде /wiki)")
     logger.info("=" * 60)
     
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
