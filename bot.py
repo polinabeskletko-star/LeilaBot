@@ -23,7 +23,6 @@ from telegram.ext import (
     CommandHandler,
     filters,
 )
-from telegram import BotCommand
 
 # ========== ЛОГИРОВАНИЕ ===========
 
@@ -1057,41 +1056,6 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"Ошибка команды /wiki: {e}")
         await update.message.reply_text("Извините, произошла ошибка при поиске в Википедии.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /help - показывает все доступные команды"""
-    help_text = """
-🤖 *Доступные команды Лейлы:*
-
-*/start* - Запустить бота и начать общение
-*/weather [город]* - Узнать погоду (например: /weather Москва)
-*/wiki [запрос]* - Найти информацию в Википедии (например: /wiki кошки)
-*/help* - Показать все команды
-
-💬 *Как общаться:*
-- Просто напиши сообщение
-- Упомяни меня (@leilabot) в группе
-- Ответь на моё сообщение
-
-📍 *Особенности:*
-- Я из Брисбена, Австралия 🌏
-- Люблю общаться с Максимом 💖
-- Знаю много интересного!
-
-Напиши мне что-нибудь! Я всегда рада поболтать 😊
-"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def set_bot_commands(application):
-    """Устанавливает меню команд бота в Telegram"""
-    commands = [
-        BotCommand("start", "Запустить бота"),
-        BotCommand("weather", "Узнать погоду в городе"),
-        BotCommand("wiki", "Поиск в Википедии"),
-        BotCommand("help", "Помощь и список команд"),
-    ]
-    await application.bot.set_my_commands(commands)
-    logger.info("✅ Меню команд установлено")
-
 # ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1314,75 +1278,57 @@ def main() -> None:
     logger.info(f"📚 Википедия доступна: ✅ (только по команде /wiki)")
     logger.info("=" * 60)
     
-    # Создаем приложение
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Добавляем обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("выбери", random_choice))
-    app.add_handler(CommandHandler("монетка", coin_flip))
-    app.add_handler(CommandHandler("угадай", guess_number))
-    app.add_handler(CommandHandler("комплимент", compliment))
-    app.add_handler(CommandHandler("цитата", quote_of_the_day))
-    app.add_handler(CommandHandler("гороскоп", horoscope))
-    app.add_handler(CommandHandler("факт", leila_fact))
-    app.add_handler(CommandHandler("вопрос", ask_leila))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     tz_obj = get_tz()
     jq = app.job_queue
     
-    # Удаляем старые задачи если есть
     for job in jq.jobs():
         job.schedule_removal()
     
     import time as time_module
-    time_module.sleep(2)  # Увеличиваем задержку для стабильности
+    time_module.sleep(1)
     
     logger.info("📅 Настройка планировщика...")
     
-    try:
-        test_time = datetime.now(tz_obj)
-        test_time = test_time.replace(second=0, microsecond=0)
-        test_time = test_time.replace(minute=test_time.minute + 2)
-        
-        jq.run_once(
-            send_morning_to_maxim,
-            when=test_time,
-            name="test-morning"
-        )
-        logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
-        
-        morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
-        evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
-        
-        jq.run_daily(
-            send_morning_to_maxim,
-            time=morning_time,
-            name="leila-morning"
-        )
-        logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time}")
-        
-        jq.run_daily(
-            send_evening_to_maxim,
-            time=evening_time,
-            name="leila-evening"
-        )
-        logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка настройки планировщика: {e}")
-        # Не прерываем выполнение из-за ошибки планировщика
+    test_time = datetime.now(tz_obj)
+    test_time = test_time.replace(second=0, microsecond=0)
+    test_time = test_time.replace(minute=test_time.minute + 2)
+    
+    jq.run_once(
+        send_morning_to_maxim,
+        when=test_time,
+        name="test-morning"
+    )
+    logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
+    
+    morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
+    evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
+    
+    jq.run_daily(
+        send_morning_to_maxim,
+        time=morning_time,
+        name="leila-morning"
+    )
+    logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time}")
+    
+    jq.run_daily(
+        send_evening_to_maxim,
+        time=evening_time,
+        name="leila-evening"
+    )
+    logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
     
     logger.info("🤖 Бот запущен!")
-    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /help и многое другое!")
-    logger.info("ℹ️ Для настройки меню команд используйте @BotFather после запуска")
+    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос]")
     
     try:
-        app.run_polling(drop_pending_updates=True)
+        app.run_polling()
     except Exception as e:
         logger.error(f"❌ Ошибка запуска: {e}")
 
