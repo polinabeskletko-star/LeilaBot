@@ -1332,53 +1332,57 @@ def main() -> None:
     app.add_handler(CommandHandler("вопрос", ask_leila))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # НЕ НУЖНО устанавливать команды асинхронно здесь
-    # Мы установим их через BotFather или после запуска бота
-    
     tz_obj = get_tz()
     jq = app.job_queue
     
+    # Удаляем старые задачи если есть
     for job in jq.jobs():
         job.schedule_removal()
     
     import time as time_module
-    time_module.sleep(1)
+    time_module.sleep(2)  # Увеличиваем задержку для стабильности
     
     logger.info("📅 Настройка планировщика...")
     
-    test_time = datetime.now(tz_obj)
-    test_time = test_time.replace(second=0, microsecond=0)
-    test_time = test_time.replace(minute=test_time.minute + 2)
-    
-    jq.run_once(
-        send_morning_to_maxim,
-        when=test_time,
-        name="test-morning"
-    )
-    logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
-    
-    morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
-    evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
-    
-    jq.run_daily(
-        send_morning_to_maxim,
-        time=morning_time,
-        name="leila-morning"
-    )
-    logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time}")
-    
-    jq.run_daily(
-        send_evening_to_maxim,
-        time=evening_time,
-        name="leila-evening"
-    )
-    logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
+    try:
+        test_time = datetime.now(tz_obj)
+        test_time = test_time.replace(second=0, microsecond=0)
+        test_time = test_time.replace(minute=test_time.minute + 2)
+        
+        jq.run_once(
+            send_morning_to_maxim,
+            when=test_time,
+            name="test-morning"
+        )
+        logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
+        
+        morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
+        evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
+        
+        jq.run_daily(
+            send_morning_to_maxim,
+            time=morning_time,
+            name="leila-morning"
+        )
+        logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time}")
+        
+        jq.run_daily(
+            send_evening_to_maxim,
+            time=evening_time,
+            name="leila-evening"
+        )
+        logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки планировщика: {e}")
+        # Не прерываем выполнение из-за ошибки планировщика
     
     logger.info("🤖 Бот запущен!")
     logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /help и многое другое!")
+    logger.info("ℹ️ Для настройки меню команд используйте @BotFather после запуска")
     
     try:
-        app.run_polling()
+        app.run_polling(drop_pending_updates=True)
     except Exception as e:
         logger.error(f"❌ Ошибка запуска: {e}")
 
