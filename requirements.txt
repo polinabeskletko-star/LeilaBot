@@ -1,4 +1,6 @@
-pytz
-openai>=1.0.0
-python-telegram-bot[job-queue]==20.3
-requests
+python-telegram-bot==20.7
+openai==1.12.0
+httpx==0.26.0
+pytz==2024.1
+wikipedia==1.4.0
+aiohttp==3.9.3
