@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-# ========== ЛОГИРОВАНИЕ ==========
+# ========== ЛОГИРОВАНИЕ ===========
 
 logging.basicConfig(
     level=logging.INFO,
