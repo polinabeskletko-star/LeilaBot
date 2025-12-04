@@ -23,6 +23,7 @@ from telegram.ext import (
     CommandHandler,
     filters,
 )
+from telegram import BotCommand
 
 # ========== ЛОГИРОВАНИЕ ===========
 
@@ -1056,6 +1057,41 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"Ошибка команды /wiki: {e}")
         await update.message.reply_text("Извините, произошла ошибка при поиске в Википедии.")
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /help - показывает все доступные команды"""
+    help_text = """
+🤖 *Доступные команды Лейлы:*
+
+*/start* - Запустить бота и начать общение
+*/weather [город]* - Узнать погоду (например: /weather Москва)
+*/wiki [запрос]* - Найти информацию в Википедии (например: /wiki кошки)
+*/help* - Показать все команды
+
+💬 *Как общаться:*
+- Просто напиши сообщение
+- Упомяни меня (@leilabot) в группе
+- Ответь на моё сообщение
+
+📍 *Особенности:*
+- Я из Брисбена, Австралия 🌏
+- Люблю общаться с Максимом 💖
+- Знаю много интересного!
+
+Напиши мне что-нибудь! Я всегда рада поболтать 😊
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def set_bot_commands(application):
+    """Устанавливает меню команд бота в Telegram"""
+    commands = [
+        BotCommand("start", "Запустить бота"),
+        BotCommand("weather", "Узнать погоду в городе"),
+        BotCommand("wiki", "Поиск в Википедии"),
+        BotCommand("help", "Помощь и список команд"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("✅ Меню команд установлено")
+
 # ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1278,11 +1314,17 @@ def main() -> None:
     logger.info(f"📚 Википедия доступна: ✅ (только по команде /wiki)")
     logger.info("=" * 60)
     
+    # Создаем приложение
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
+    # Устанавливаем команды бота (асинхронно через run_async)
+    app.run_async(set_bot_commands(app))
+    
+    # Добавляем обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
+    app.add_handler(CommandHandler("help", help_command))  # Новая команда /help
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     tz_obj = get_tz()
@@ -1325,7 +1367,7 @@ def main() -> None:
     logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
     
     logger.info("🤖 Бот запущен!")
-    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос]")
+    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /help")
     
     try:
         app.run_polling()
