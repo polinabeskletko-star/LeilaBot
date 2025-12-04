@@ -1,6 +1,6 @@
-python-telegram-bot==20.7
+python-telegram-bot[job-queue]==20.7
 openai==1.12.0
-httpx==0.25.2  # Changed from 0.26.0 to 0.25.2
+httpx==0.25.2
 pytz==2024.1
 wikipedia==1.4.0
 aiohttp==3.9.3
