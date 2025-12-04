@@ -1317,15 +1317,23 @@ def main() -> None:
     # Создаем приложение
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Устанавливаем команды бота (асинхронно через run_async)
-    app.run_async(set_bot_commands(app))
-    
     # Добавляем обработчики команд
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
-    app.add_handler(CommandHandler("help", help_command))  # Новая команда /help
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("выбери", random_choice))
+    app.add_handler(CommandHandler("монетка", coin_flip))
+    app.add_handler(CommandHandler("угадай", guess_number))
+    app.add_handler(CommandHandler("комплимент", compliment))
+    app.add_handler(CommandHandler("цитата", quote_of_the_day))
+    app.add_handler(CommandHandler("гороскоп", horoscope))
+    app.add_handler(CommandHandler("факт", leila_fact))
+    app.add_handler(CommandHandler("вопрос", ask_leila))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # НЕ НУЖНО устанавливать команды асинхронно здесь
+    # Мы установим их через BotFather или после запуска бота
     
     tz_obj = get_tz()
     jq = app.job_queue
@@ -1367,7 +1375,7 @@ def main() -> None:
     logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
     
     logger.info("🤖 Бот запущен!")
-    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /help")
+    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /help и многое другое!")
     
     try:
         app.run_polling()
