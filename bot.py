@@ -629,7 +629,7 @@ async def generate_leila_response(
     max_tokens = 150 if user_type == "MAXIM" else 100
     temperature = 0.85 if user_type == "MAXIM" else 0.7
     
-    answer = await call_deekseek(messages, max_tokens=max_tokens, temperature=temperature)
+    answer = await call_deepseek(messages, max_tokens=max_tokens, temperature=temperature)
     
     if not answer:
         # Варианты фолбэков
