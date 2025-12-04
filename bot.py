@@ -9,9 +9,11 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from enum import Enum
 from dataclasses import dataclass
 import json
+import aiohttp
 
 import pytz
 import httpx
+import wikipedia
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
@@ -41,11 +43,11 @@ DEFAULT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # Модели DeepSeek
 DEEPSEEK_MODELS = {
-    "chat": "deepseek-chat",           # Базовая для чата
-    "lite": "deepseek-v3-lite",        # Улучшенная, но быстрая
-    "v3": "deepseek-v3",               # Самая умная
-    "r1": "deepseek-r1",               # Для рассуждений
-    "coder": "deepseek-coder-v2",      # Для кода/технического
+    "chat": "deepseek-chat",
+    "lite": "deepseek-v3-lite",
+    "v3": "deepseek-v3",
+    "r1": "deepseek-r1",
+    "coder": "deepseek-coder-v2",
 }
 
 # Администратор для тестовых команд
@@ -53,12 +55,15 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
+# Настройка Википедии
+wikipedia.set_lang("ru")
+
 # ГЕОГРАФИЧЕСКИЕ НАСТРОЙКИ
 BOT_LOCATION = {
     "city": "Брисбен",
     "country": "Австралия",
     "timezone": "Australia/Brisbane",
-    "hemisphere": "southern",  # южное полушарие
+    "hemisphere": "southern",
     "coordinates": {"lat": -27.4698, "lon": 153.0251}
 }
 
@@ -86,25 +91,20 @@ class UserInfo:
     username: str = ""
     last_seen: datetime = None
     conversation_topics: List[str] = None
-    gender: str = "unknown"  # male, female, unknown
+    gender: str = "unknown"
     
     def __post_init__(self):
         if self.last_seen is None:
             self.last_seen = datetime.now(pytz.UTC)
         if self.conversation_topics is None:
             self.conversation_topics = []
-        
-        # Автоматическое определение пола по имени
         self._determine_gender()
     
     def _determine_gender(self):
-        """Определяет пол по имени (очень упрощённо)"""
+        """Определяет пол по имени"""
         if self.gender == "unknown":
             name_lower = self.first_name.lower()
-            
-            # Русские женские имена (окончания)
             female_endings = ['а', 'я', 'ия', 'ина', 'ла', 'та']
-            # Русские мужские имена
             male_endings = ['й', 'ь', 'н', 'р', 'л', 'с', 'в', 'д', 'м']
             
             for ending in female_endings:
@@ -305,7 +305,7 @@ def get_australian_context() -> str:
 """
     return context
 
-# ========== ПОГОДА - УЛУЧШЕННАЯ СИСТЕМА ==========
+# ========== ПОГОДА - СЕРВИС ==========
 
 class WeatherService:
     """Сервис для работы с погодой"""
@@ -314,52 +314,29 @@ class WeatherService:
         self.api_key = OPENWEATHER_API_KEY
         self.base_url = "https://api.openweathermap.org/data/2.5/weather"
         self.cache = {}
-        self.cache_duration = 1800  # 30 минут
+        self.cache_duration = 1800
         
         self.city_aliases = {
-            "москва": "Moscow,ru",
-            "москве": "Moscow,ru",
-            "питер": "Saint Petersburg,ru",
-            "петербург": "Saint Petersburg,ru",
-            "санкт-петербург": "Saint Petersburg,ru",
-            "спб": "Saint Petersburg,ru",
-            "калуга": "Kaluga,ru",
-            "калуге": "Kaluga,ru",
-            "казань": "Kazan,ru",
-            "нижний новгород": "Nizhny Novgorod,ru",
-            "новосибирск": "Novosibirsk,ru",
-            "екатеринбург": "Yekaterinburg,ru",
-            "самара": "Samara,ru",
-            "омск": "Omsk,ru",
-            "челябинск": "Chelyabinsk,ru",
-            "ростов": "Rostov-on-Don,ru",
-            "уфа": "Ufa,ru",
-            "красноярск": "Krasnoyarsk,ru",
-            "пермь": "Perm,ru",
-            "воронеж": "Voronezh,ru",
-            "волгоград": "Volgograd,ru",
-            
-            "брисбен": "Brisbane,au",
-            "брисбене": "Brisbane,au",
-            "сидней": "Sydney,au",
-            "сиднее": "Sydney,au",
-            "мельбурн": "Melbourne,au",
-            "мельбурне": "Melbourne,au",
-            "перт": "Perth,au",
-            "перте": "Perth,au",
-            "адelaide": "Adelaide,au",
-            "кэнберра": "Canberra,au",
-            
-            "лондон": "London,uk",
-            "париж": "Paris,fr",
-            "берлин": "Berlin,de",
-            "токио": "Tokyo,jp",
-            "нью-йорк": "New York,us",
-            "нью йорк": "New York,us",
-            "лос-анджелес": "Los Angeles,us",
-            "торонто": "Toronto,ca",
-            "дубай": "Dubai,ae",
-            "пекин": "Beijing,cn",
+            "москва": "Moscow,ru", "москве": "Moscow,ru",
+            "питер": "Saint Petersburg,ru", "петербург": "Saint Petersburg,ru",
+            "санкт-петербург": "Saint Petersburg,ru", "спб": "Saint Petersburg,ru",
+            "калуга": "Kaluga,ru", "калуге": "Kaluga,ru",
+            "казань": "Kazan,ru", "нижний новгород": "Nizhny Novgorod,ru",
+            "новосибирск": "Novosibirsk,ru", "екатеринбург": "Yekaterinburg,ru",
+            "самара": "Samara,ru", "омск": "Omsk,ru",
+            "челябинск": "Chelyabinsk,ru", "ростов": "Rostov-on-Don,ru",
+            "уфа": "Ufa,ru", "красноярск": "Krasnoyarsk,ru",
+            "пермь": "Perm,ru", "воронеж": "Voronezh,ru",
+            "волгоград": "Volgograd,ru", "брисбен": "Brisbane,au",
+            "брисбене": "Brisbane,au", "сидней": "Sydney,au",
+            "сиднее": "Sydney,au", "мельбурн": "Melbourne,au",
+            "мельбурне": "Melbourne,au", "перт": "Perth,au",
+            "адelaide": "Adelaide,au", "кэнберра": "Canberra,au",
+            "лондон": "London,uk", "париж": "Paris,fr",
+            "берлин": "Berlin,de", "токио": "Tokyo,jp",
+            "нью-йорк": "New York,us", "нью йорк": "New York,us",
+            "лос-анджелес": "Los Angeles,us", "торонто": "Toronto,ca",
+            "дубай": "Dubai,ae", "пекин": "Beijing,cn",
             "сеул": "Seoul,kr",
         }
         
@@ -459,7 +436,6 @@ class WeatherService:
                     }
                     
                     self.cache[cache_key] = (result, datetime.now().timestamp())
-                    
                     return result
                     
             except Exception as e:
@@ -512,7 +488,7 @@ class WeatherService:
 weather_service = WeatherService()
 
 async def handle_weather_query(text: str) -> Optional[str]:
-    """Обрабатывает запрос о погоде и возвращает ответ"""
+    """Обрабатывает запрос о погоде"""
     if not weather_service.is_weather_query(text):
         return None
     
@@ -532,64 +508,197 @@ async def handle_weather_query(text: str) -> Optional[str]:
     
     return None
 
-# ========== DEEPSEEK API - ДИНАМИЧЕСКИЙ ВЫБОР МОДЕЛИ ==========
+# ========== ВИКИПЕДИЯ - СЕРВИС ==========
+
+class WikipediaService:
+    """Сервис для работы с Wikipedia"""
+    
+    def __init__(self):
+        self.summary_cache = {}
+        self.search_cache = {}
+        
+        self.wiki_keywords = [
+            "кто такой", "кто такая", "что такое", "что значит",
+            "расскажи о", "расскажите о", "информация о", 
+            "что такое", "кто это", "что это",
+            "биография", "история", "определение",
+            "википедия", "вики", "wikipedia"
+        ]
+    
+    def is_wikipedia_query(self, text: str) -> bool:
+        """Определяет, является ли запрос поиском в Википедии"""
+        text_lower = text.lower()
+        
+        for keyword in self.wiki_keywords:
+            if keyword in text_lower:
+                return True
+        
+        if any(word[0].isupper() for word in text.split() if len(word) > 2):
+            if len(text.split()) <= 5:
+                return True
+        
+        return False
+    
+    def extract_search_term(self, text: str) -> str:
+        """Извлекает поисковый термин из запроса"""
+        text_lower = text.lower()
+        
+        for keyword in self.wiki_keywords:
+            text_lower = text_lower.replace(keyword, "")
+        
+        stop_words = ["пожалуйста", "мне", "расскажи", "расскажите", "что", "кто", "такое", "такая", "это"]
+        for word in stop_words:
+            text_lower = text_lower.replace(word, "")
+        
+        search_term = re.sub(r'[^\w\s]', '', text_lower).strip()
+        
+        if not search_term:
+            words = text.split()
+            capitalized = [word for word in words if word and word[0].isupper()]
+            if capitalized:
+                search_term = " ".join(capitalized[:3])
+        
+        return search_term
+    
+    async def search_wikipedia(self, query: str, sentences: int = 3) -> Optional[Tuple[str, str, str]]:
+        """Ищет информацию в Википедии"""
+        if not query:
+            return None
+        
+        cache_key = f"{query}_{sentences}"
+        if cache_key in self.summary_cache:
+            return self.summary_cache[cache_key]
+        
+        try:
+            try:
+                page = wikipedia.page(query, auto_suggest=False)
+                summary = wikipedia.summary(query, sentences=sentences, auto_suggest=False)
+                url = page.url
+                title = page.title
+                
+                result = (summary, title, url)
+                self.summary_cache[cache_key] = result
+                return result
+                
+            except wikipedia.DisambiguationError as e:
+                options = e.options[:3]
+                if options:
+                    try:
+                        page = wikipedia.page(options[0], auto_suggest=False)
+                        summary = wikipedia.summary(options[0], sentences=sentences, auto_suggest=False)
+                        url = page.url
+                        title = page.title
+                        
+                        result = (summary, title, url)
+                        self.summary_cache[cache_key] = result
+                        return result
+                    except:
+                        pass
+            
+            except wikipedia.PageError:
+                pass
+            
+            search_results = wikipedia.search(query, results=3)
+            if search_results:
+                try:
+                    page = wikipedia.page(search_results[0], auto_suggest=False)
+                    summary = wikipedia.summary(search_results[0], sentences=sentences, auto_suggest=False)
+                    url = page.url
+                    title = page.title
+                    
+                    result = (summary, title, url)
+                    self.summary_cache[cache_key] = result
+                    return result
+                except:
+                    pass
+            
+        except Exception as e:
+            logger.error(f"Ошибка поиска в Википедии для '{query}': {e}")
+        
+        return None
+    
+    async def get_wikipedia_answer(self, text: str, user_name: str, is_maxim: bool) -> Optional[str]:
+        """Получает ответ из Википедии"""
+        search_term = self.extract_search_term(text)
+        
+        if not search_term or len(search_term) < 2:
+            return None
+        
+        result = await self.search_wikipedia(search_term, sentences=4)
+        
+        if result:
+            summary, title, url = result
+            
+            if is_maxim:
+                response = f"💖 Вот что я нашла о '{title}', мой дорогой:\n\n"
+                response += f"📚 {summary}\n\n"
+                response += f"🔗 Подробнее: {url}\n"
+                response += "Надеюсь, эта информация будет полезной! 💖"
+            else:
+                response = f"📚 Информация о '{title}' из Википедии:\n\n"
+                response += f"{summary}\n\n"
+                response += f"🔗 Ссылка: {url}"
+            
+            return response
+        
+        return None
+
+# Инициализируем сервис Википедии
+wiki_service = WikipediaService()
+
+# ========== DEEPSEEK API ==========
 
 def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     """Анализирует сложность запроса и выбирает модель"""
     
     text_lower = text.lower()
     
-    # Критерии для сложных запросов
     complex_patterns = [
         r"объясни.*почему", r"сравни.*и", r"проанализируй",
         r"какой.*лучше", r"посоветуй.*как", r"реши.*задачу",
         r"что.*думаешь.*о", r"как.*относишься.*к",
     ]
     
-    # Критерии для reasoning
     reasoning_patterns = [
         r"почему.*так", r"в чём.*причина", r"какова.*причина",
         r"как.*это.*работает", r"объясни.*принцип",
         r"логика.*в.*том", r"следует.*ли", r"должен.*ли",
     ]
     
-    # Критерии для технических вопросов
     technical_patterns = [
         r"код", r"программир", r"алгоритм", r"функци",
         r"переменн", r"база.*данных", r"api", r"сервер",
         r"бот.*как.*сделать", r"telegram.*бот", r"python",
     ]
     
-    # Определяем сложность
     is_complex = any(re.search(pattern, text_lower) for pattern in complex_patterns)
     is_reasoning = any(re.search(pattern, text_lower) for pattern in reasoning_patterns)
     is_technical = any(re.search(pattern, text_lower) for pattern in technical_patterns)
     
-    # Выбираем модель
     if is_reasoning:
         model = DEEPSEEK_MODELS["r1"]
         temperature = 0.3
-        max_tokens = 300  # Увеличенный лимит
+        max_tokens = 300
         reason = "reasoning_query"
     elif is_technical:
         model = DEEPSEEK_MODELS["coder"]
         temperature = 0.5
-        max_tokens = 350  # Увеличенный лимит
+        max_tokens = 350
         reason = "technical_query"
     elif is_complex:
         model = DEEPSEEK_MODELS["v3"]
         temperature = 0.7
-        max_tokens = 250  # Увеличенный лимит
+        max_tokens = 250
         reason = "complex_query"
     elif is_maxim:
         model = DEEPSEEK_MODELS["lite"]
         temperature = 0.85
-        max_tokens = 200  # Увеличенный лимит для Максима
+        max_tokens = 200
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 180  # Увеличенный лимит для всех
+        max_tokens = 180
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
@@ -608,14 +717,14 @@ async def call_deepseek(
     model_config: Optional[Dict] = None,
     **kwargs
 ) -> Optional[str]:
-    """Вызов DeepSeek API с динамическим выбором модели"""
+    """Вызов DeepSeek API"""
     if not client:
         return None
     
     if model_config:
         model = model_config.get("model", DEFAULT_MODEL)
         temperature = model_config.get("temperature", 0.7)
-        max_tokens = model_config.get("max_tokens", 180)  # Увеличенный дефолт
+        max_tokens = model_config.get("max_tokens", 180)
         require_reasoning = model_config.get("require_reasoning", False)
     else:
         model = DEFAULT_MODEL
@@ -695,7 +804,7 @@ def get_conversation_memory(user_id: int, chat_id: int) -> ConversationMemory:
 # ========== ГЕНЕРАЦИЯ ПРОМПТОВ ==========
 
 def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
-    """Генерирует системный промпт с разными стилями для Максима и остальных"""
+    """Генерирует системный промпт"""
     
     australian_context = get_australian_context()
     season, season_info = get_current_season()
@@ -704,7 +813,6 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
     user_name = user_info.get_display_name()
     gender = user_info.gender
     
-    # Разные стили для Максима и других пользователей
     if is_maxim:
         style_instruction = f"""
 🎯 ТЫ ОБЩАЕШЬСЯ С МАКСИМОМ — человеком, который тебе очень нравится.
@@ -720,7 +828,6 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 - Можно добавлять личные комментарии и мнения
 """
     else:
-        # Определяем обращение по полу
         if gender == "female":
             pronoun = "девушкой"
             emoji = "🌸👋"
@@ -747,7 +854,6 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 - Отвечай только на заданный вопрос
 """
     
-    # Добавляем инструкцию для reasoning если нужно
     reasoning_instruction = ""
     if model_config.get("require_reasoning"):
         reasoning_instruction = "\n🤔 Для этого запроса подумай вслух и объясни свои рассуждения."
@@ -774,9 +880,8 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 # ========== ОСНОВНАЯ ЛОГИКА ОТВЕТОВ ==========
 
 def clean_response(text: str, is_maxim: bool = False) -> str:
-    """Очищает ответ, по-разному для Максима и других"""
+    """Очищает ответ"""
     
-    # Удаляем мета-комментарии для всех
     patterns = [
         r"Как Лейла, я.*?,",
         r"От имени Лейлы.*?,",
@@ -791,9 +896,7 @@ def clean_response(text: str, is_maxim: bool = False) -> str:
     for pattern in patterns:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
     
-    # Для не-Максима дополнительно очищаем
     if not is_maxim:
-        # Удаляем излишне эмоциональные фразы
         emotional_patterns = [
             r"Мой дорогой.*,",
             r"Милый.*,",
@@ -809,18 +912,13 @@ def clean_response(text: str, is_maxim: bool = False) -> str:
         for pattern in emotional_patterns:
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
         
-        # Удаляем излишние эмодзи (оставляем 1-2 максимум)
         emoji_pattern = r'[^\w\s,.!?-]'
         emojis = re.findall(emoji_pattern, text)
         if len(emojis) > 2:
-            # Оставляем только первые 2 эмодзи
             for emoji in emojis[2:]:
                 text = text.replace(emoji, '', 1)
     
-    # Убираем лишние пробелы
     text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Убираем лишние точки в начале
     text = re.sub(r'^[.,\s]+', '', text)
     
     return text
@@ -831,7 +929,7 @@ async def generate_leila_response(
     memory: ConversationMemory,
     context: Optional[Dict] = None
 ) -> Tuple[str, ConversationMemory]:
-    """Генерирует ответ Лейлы с учетом типа пользователя"""
+    """Генерирует ответ Лейлы"""
     
     if not client:
         if user_info.is_maxim():
@@ -842,7 +940,6 @@ async def generate_leila_response(
     
     is_maxim = user_info.is_maxim()
     
-    # Проверяем, не запрос ли о погоде
     weather_response = await handle_weather_query(user_message)
     if weather_response:
         logger.info(f"🌤️ Запрос о погоде от {user_info.get_display_name()}")
@@ -850,28 +947,23 @@ async def generate_leila_response(
         if is_maxim:
             response = f"{weather_response}\n\nНадеюсь, эта информация полезна, мой дорогой! ☀️💖"
         else:
-            response = weather_response  # Только информация о погоде
+            response = weather_response
         
         memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
         memory.add_message("assistant", response)
         
         return response, memory
     
-    # Анализируем запрос и выбираем модель
     model_config = analyze_query_complexity(user_message, is_maxim)
     
-    # Генерируем системный промпт
     system_prompt = generate_system_prompt(user_info, model_config)
     
-    # Собираем сообщения
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     
-    # Добавляем историю диалога
     recent_messages = memory.get_recent_messages(6)
     if recent_messages:
         messages.extend(recent_messages)
     
-    # Добавляем контекст если есть
     if context:
         context_text = ""
         if "time_context" in context:
@@ -882,14 +974,11 @@ async def generate_leila_response(
         if context_text:
             messages.append({"role": "user", "content": f"Контекст:\n{context_text}"})
     
-    # Добавляем текущее сообщение
     messages.append({"role": "user", "content": f"{user_info.get_display_name()}: {user_message}"})
     
-    # Генерируем ответ через DeepSeek
     answer = await call_deepseek(messages, model_config)
     
     if not answer:
-        # Фолбэк ответы
         if is_maxim:
             fallbacks = [
                 "Извини, мой цифровой разум немного завис... Что ты сказал, милый? 💭",
@@ -904,14 +993,11 @@ async def generate_leila_response(
             ]
         answer = random.choice(fallbacks)
     
-    # Очищаем ответ по-разному для Максима и других
     answer = clean_response(answer, is_maxim)
     
-    # Обновляем память
     memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
     memory.add_message("assistant", answer)
     
-    # Добавляем тему в историю
     if len(user_message) > 10:
         user_info.add_topic(f"диалог: {user_message[:30]}...")
     
@@ -966,6 +1052,69 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Ошибка /weather: {e}")
         await update.message.reply_text("Извини, не могу получить данные о погоде.")
 
+async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /wiki для поиска в Википедии"""
+    try:
+        user_info = await get_or_create_user_info(update)
+        is_maxim = user_info.is_maxim()
+        
+        args = context.args
+        if not args:
+            if is_maxim:
+                await update.message.reply_text(
+                    "Милый, напиши что искать после команды /wiki 😊\n"
+                    "Например: /wiki кошки или /wiki Эйнштейн\n\n"
+                    "Или просто спроси меня в чате: 'Кто такой Эйнштейн?'"
+                )
+            else:
+                await update.message.reply_text(
+                    "Напишите что искать после команды /wiki\n"
+                    "Например: /wiki кошки\n\n"
+                    "Или спросите в чате: 'Что такое ИИ?'"
+                )
+            return
+        
+        query = " ".join(args)
+        
+        result = await wiki_service.search_wikipedia(query, sentences=5)
+        
+        if result:
+            summary, title, url = result
+            
+            if is_maxim:
+                response = f"💖 Вот что я нашла о '{title}', мой дорогой:\n\n"
+                response += f"📖 {summary}\n\n"
+                response += f"🔍 Подробнее: {url}\n\n"
+                response += "Надеюсь, эта информация тебе пригодится! 😊"
+            else:
+                response = f"📚 Информация о '{title}':\n\n"
+                response += f"{summary}\n\n"
+                response += f"🔗 Подробнее: {url}"
+            
+            if len(response) > 4000:
+                await update.message.reply_text(response[:4000])
+                await update.message.reply_text(response[4000:])
+            else:
+                await update.message.reply_text(response, disable_web_page_preview=True)
+                
+        else:
+            if is_maxim:
+                await update.message.reply_text(
+                    f"Извини, милый, не смогла найти информацию о '{query}' в Википедии 😔\n"
+                    f"Попробуй уточнить запрос или спросить о чем-то другом?"
+                )
+            else:
+                await update.message.reply_text(
+                    f"Не удалось найти информацию о '{query}' в Википедии.\n"
+                    f"Попробуйте уточнить запрос."
+                )
+                
+    except Exception as e:
+        logger.error(f"Ошибка команды /wiki: {e}")
+        await update.message.reply_text("Извините, произошла ошибка при поиске в Википедии.")
+
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик всех сообщений"""
     msg = update.effective_message
@@ -979,19 +1128,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text.strip():
         return
     
-    # Пропускаем сообщения от самого бота
     if user.id == context.bot.id:
         return
     
     try:
-        # Получаем информацию о пользователе
         user_info = await get_or_create_user_info(update)
         user_name = user_info.get_display_name()
         is_maxim = user_info.is_maxim()
         
         logger.info(f"👤 {'МАКСИМ' if is_maxim else user_name}: {text[:50]}...")
         
-        # ---- ФИЛЬТР ДЛЯ ГРУПП ----
         if chat.type in ("group", "supergroup"):
             bot_username = context.bot.username or ""
             if not bot_username:
@@ -1012,15 +1158,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not (is_maxim or mentioned_by_name or mentioned_by_username or reply_to_bot):
                 return
         
-        # Получаем память диалога
+        if wiki_service.is_wikipedia_query(text):
+            wiki_answer = await wiki_service.get_wikipedia_answer(text, user_name, is_maxim)
+            
+            if wiki_answer:
+                logger.info(f"📚 Ответ из Википедии для {user_name}")
+                
+                if len(wiki_answer) > 4000:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=wiki_answer[:4000],
+                        disable_web_page_preview=True
+                    )
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=wiki_answer[4000:],
+                        disable_web_page_preview=True
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=wiki_answer,
+                        disable_web_page_preview=True
+                    )
+                
+                if is_maxim and random.random() < 0.5:
+                    follow_up = random.choice([
+                        "\n\nИнтересно было узнать об этом вместе с тобой! 😊",
+                        "\n\nНадеюсь, эта информация была полезной для тебя! 💖",
+                        "\n\nВсегда рада помочь тебе узнать что-то новое! 🌟"
+                    ])
+                    await context.bot.send_message(chat_id=chat.id, text=follow_up)
+                
+                return
+        
         memory = get_conversation_memory(user.id, chat.id)
         
-        # Для Максима иногда пропускаем ответ
         if is_maxim and random.random() < 0.15:
             logger.info(f"💭 Пропускаем ответ Максиму для естественности")
             return
         
-        # Подготавливаем контекст
         extra_context = {}
         tz = get_tz()
         now = datetime.now(tz)
@@ -1030,7 +1207,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         season, season_info = get_current_season()
         extra_context["season_context"] = f"Сейчас {season} в {BOT_LOCATION['city']}е"
         
-        # Генерируем ответ
         reply, updated_memory = await generate_leila_response(
             text, 
             user_info, 
@@ -1038,10 +1214,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             extra_context
         )
         
-        # Сохраняем память
         conversation_memories[get_memory_key(user.id, chat.id)] = updated_memory
         
-        # Отправляем сообщение
         await context.bot.send_message(chat_id=chat.id, text=reply)
         logger.info(f"✅ Ответ отправлен {'Максиму' if is_maxim else user_name}")
             
@@ -1099,7 +1273,7 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         model_config = {
             "model": DEEPSEEK_MODELS["lite"],
             "temperature": 0.9,
-            "max_tokens": 250,  # Увеличенный лимит для особых сообщений
+            "max_tokens": 250,
             "require_reasoning": False
         }
         
@@ -1153,7 +1327,7 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         model_config = {
             "model": DEEPSEEK_MODELS["lite"],
             "temperature": 0.85,
-            "max_tokens": 200,  # Увеличенный лимит
+            "max_tokens": 200,
             "require_reasoning": False
         }
         
@@ -1179,13 +1353,12 @@ def main() -> None:
     if not GROUP_CHAT_ID:
         raise RuntimeError("GROUP_CHAT_ID не задан")
     
-    # Выводим информацию при запуске
     tz = get_tz()
     now = datetime.now(tz)
     season, season_info = get_current_season()
     
     logger.info("=" * 60)
-    logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА")
+    logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА С ВИКИПЕДИЕЙ")
     logger.info(f"📍 Локация: {BOT_LOCATION['city']}, {BOT_LOCATION['country']}")
     logger.info(f"📅 Сезон: {season} ({season_info.get('description', '')})")
     logger.info(f"🕐 Время: {now.strftime('%H:%M:%S')}")
@@ -1193,31 +1366,27 @@ def main() -> None:
     logger.info(f"👤 Максим ID: {MAXIM_ID}")
     logger.info(f"🤖 DeepSeek доступен: {'✅' if client else '❌'}")
     logger.info(f"🌤️ Погодный сервис: {'✅' if OPENWEATHER_API_KEY else '❌'}")
+    logger.info(f"📚 Википедия доступна: ✅")
     logger.info("=" * 60)
     
-    # Запускаем бота
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("wiki", wiki_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Планировщик
     tz_obj = get_tz()
     jq = app.job_queue
     
-    # Удаляем старые задачи
     for job in jq.jobs():
         job.schedule_removal()
     
     import time as time_module
     time_module.sleep(1)
     
-    # Добавляем задачи
     logger.info("📅 Настройка планировщика...")
     
-    # Тестовый запуск через 2 минуты
     test_time = datetime.now(tz_obj)
     test_time = test_time.replace(second=0, microsecond=0)
     test_time = test_time.replace(minute=test_time.minute + 2)
@@ -1229,7 +1398,6 @@ def main() -> None:
     )
     logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
     
-    # Основные задачи
     morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
     evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
     
@@ -1247,9 +1415,8 @@ def main() -> None:
     )
     logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
     
-    # Запуск
     logger.info("🤖 Бот запущен!")
-    logger.info("📝 Доступные команды: /start, /weather [город]")
+    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос]")
     
     try:
         app.run_polling()
