@@ -4,9 +4,11 @@ import random
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
+from dataclasses import dataclass, asdict
+import json
 
 import pytz
 import httpx
@@ -38,12 +40,27 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # Администратор для тестовых команд
-ADMIN_ID = os.getenv("ADMIN_ID", "")  # Ваш Telegram ID
+ADMIN_ID = os.getenv("ADMIN_ID", "")
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
-OPENWEATHER_CITY_ID = os.getenv("OPENWEATHER_CITY_ID")
+OPENWEATHER_CITY_ID = os.getenv("OPENWEATHER_CITY_ID", "2174003")  # Brisbane, AU по умолчанию
 
-BOT_TZ = os.getenv("BOT_TZ", "Australia/Brisbane")
+# ГЕОГРАФИЧЕСКИЕ НАСТРОЙКИ
+BOT_LOCATION = {
+    "city": "Брисбен",
+    "country": "Австралия",
+    "timezone": "Australia/Brisbane",
+    "hemisphere": "southern",  # южное полушарие
+    "coordinates": {"lat": -27.4698, "lon": 153.0251}
+}
+
+# Временные зоны для пользователей (можно расширить)
+USER_TIMEZONES = {
+    "Максим": "Australia/Brisbane",
+    "default": "Australia/Brisbane"
+}
+
+BOT_TZ = BOT_LOCATION["timezone"]
 
 # Общий чат, куда Лейла пишет
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
@@ -56,8 +73,111 @@ except ValueError:
     logger.warning("TARGET_USER_ID некорректен")
     MAXIM_ID = 0
 
-# Кэш пользователей для обращения по имени
-user_cache: Dict[int, Dict[str, Any]] = {}
+# ========== ДАТАКЛАССЫ ==========
+
+@dataclass
+class UserInfo:
+    """Информация о пользователе"""
+    id: int
+    name: str
+    first_name: str
+    last_name: str
+    username: str
+    last_seen: datetime
+    timezone: str
+    location: Optional[Dict[str, Any]] = None
+    conversation_topics: List[str] = None
+    
+    def __post_init__(self):
+        if self.conversation_topics is None:
+            self.conversation_topics = []
+    
+    def get_display_name(self) -> str:
+        """Получает отображаемое имя"""
+        if self.first_name:
+            return self.first_name
+        elif self.username:
+            return f"@{self.username}"
+        elif self.full_name:
+            return self.full_name
+        return "Пользователь"
+    
+    @property
+    def full_name(self) -> str:
+        """Полное имя"""
+        parts = []
+        if self.first_name:
+            parts.append(self.first_name)
+        if self.last_name:
+            parts.append(self.last_name)
+        return " ".join(parts) if parts else ""
+    
+    def add_topic(self, topic: str):
+        """Добавляет тему в историю разговоров"""
+        if topic not in self.conversation_topics:
+            self.conversation_topics.append(topic)
+            # Ограничиваем историю последними 10 темами
+            if len(self.conversation_topics) > 10:
+                self.conversation_topics = self.conversation_topics[-10:]
+
+@dataclass
+class ConversationMemory:
+    """Память о диалоге"""
+    user_id: int
+    chat_id: int
+    messages: List[Dict[str, str]]
+    last_activity: datetime
+    context_summary: str = ""
+    
+    def add_message(self, role: str, content: str):
+        """Добавляет сообщение в историю"""
+        self.messages.append({"role": role, "content": content})
+        self.last_activity = datetime.now(pytz.UTC)
+        
+        # Ограничиваем историю
+        if len(self.messages) > 30:
+            self.messages = self.messages[-30:]
+    
+    def get_recent_messages(self, count: int = 10) -> List[Dict[str, str]]:
+        """Получает последние сообщения"""
+        return self.messages[-count:] if self.messages else []
+    
+    def get_context_summary(self) -> str:
+        """Создает краткое резюме контекста"""
+        if self.context_summary:
+            return self.context_summary
+            
+        # Извлекаем ключевые темы из последних сообщений
+        recent = self.get_recent_messages(5)
+        topics = set()
+        
+        for msg in recent:
+            content = msg["content"].lower()
+            if any(word in content for word in ["работа", "проект", "задача"]):
+                topics.add("работа/проекты")
+            if any(word in content for word in ["погод", "температур", "дождь", "солнц"]):
+                topics.add("погода")
+            if any(word in content for word in ["еда", "ужин", "обед", "завтрак", "кофе"]):
+                topics.add("еда/напитки")
+            if any(word in content for word in ["планы", "выходные", "отпуск", "поездка"]):
+                topics.add("планы")
+            if any(word in content for word in ["музыка", "фильм", "сериал", "книга"]):
+                topics.add("развлечения")
+            if any(word in content for word in ["спорт", "тренировка", "бег", "йога"]):
+                topics.add("спорт")
+        
+        if topics:
+            self.context_summary = f"Недавно обсуждали: {', '.join(topics)}"
+        
+        return self.context_summary or ""
+
+# ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+
+# Кэш пользователей
+user_cache: Dict[int, UserInfo] = {}
+
+# Память диалогов
+conversation_memories: Dict[str, ConversationMemory] = {}
 
 # Инициализация DeepSeek клиента
 if DEEPSEEK_API_KEY:
@@ -70,194 +190,214 @@ else:
     client = None
     logger.warning("❌ DEEPSEEK_API_KEY не задан, ответы Лейлы работать не будут.")
 
-# ========== ВАЛИДАЦИЯ НАСТРОЕК ==========
-
-def validate_group_chat_id() -> bool:
-    """Проверяет корректность GROUP_CHAT_ID"""
-    if not GROUP_CHAT_ID:
-        logger.error("❌ GROUP_CHAT_ID не задан")
-        return False
-    
-    try:
-        chat_id_int = int(GROUP_CHAT_ID)
-        if chat_id_int > 0:
-            logger.warning(f"⚠️ GROUP_CHAT_ID положительный ({chat_id_int}). Для групп обычно отрицательный!")
-        logger.info(f"✅ GROUP_CHAT_ID: {GROUP_CHAT_ID}")
-        return True
-    except ValueError:
-        logger.error(f"❌ GROUP_CHAT_ID не число: {GROUP_CHAT_ID}")
-        return False
-
-def print_startup_info():
-    """Выводит информацию при запуске бота"""
-    tz = get_tz()
-    now = datetime.now(tz)
-    
-    logger.info("=" * 50)
-    logger.info("🚀 ЗАПУСК БОТА ЛЕЙЛА")
-    logger.info(f"📅 Текущее время: {now.strftime('%H:%M:%S %d.%m.%Y')}")
-    logger.info(f"🌐 Часовой пояс: {BOT_TZ}")
-    logger.info(f"👤 Максим ID: {MAXIM_ID}")
-    logger.info(f"💬 Группа ID: {GROUP_CHAT_ID}")
-    logger.info(f"🤖 DeepSeek доступен: {bool(client)}")
-    logger.info(f"🔑 Администратор: {ADMIN_ID}")
-    logger.info("=" * 50)
-
-# ========== ENUMS И ТИПЫ ==========
-
-class Mood(Enum):
-    """Настроения Лейлы для разнообразия"""
-    PLAYFUL_FLIRTY = "игриво-флиртующее"
-    TENDER_CARING = "нежно-заботливое"
-    ROMANTIC_DREAMY = "романтично-мечтательное"
-    SUPPORTIVE_MOTIVATING = "поддерживающее"
-    MYSTERIOUS_INTIMATE = "загадочно-интимное"
-
-class TimeOfDay(Enum):
-    """Время суток для контекста"""
-    MORNING = "утро"
-    DAY = "день"
-    EVENING = "вечер"
-    NIGHT = "ночь"
-
-class UserType(Enum):
-    """Тип пользователя для определения стиля общения"""
-    MAXIM = "maxim"
-    OTHER_MALE = "other_male"
-    OTHER_FEMALE = "other_female"
-    OTHER_UNKNOWN = "other_unknown"
-
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ==========
+# ========== ГЕОГРАФИЧЕСКИЕ ФУНКЦИИ ==========
 
 def get_tz() -> pytz.timezone:
     """Получает объект часового пояса"""
     return pytz.timezone(BOT_TZ)
 
-def get_time_of_day() -> TimeOfDay:
-    """Определяет время суток"""
-    tz = get_tz()
-    now = datetime.now(tz)
-    hour = now.hour
+def get_season_for_location(month: int, hemisphere: str = "southern") -> str:
+    """
+    Определяет время года с учетом полушария
     
-    if 5 <= hour < 12:
-        return TimeOfDay.MORNING
-    elif 12 <= hour < 17:
-        return TimeOfDay.DAY
-    elif 17 <= hour < 23:
-        return TimeOfDay.EVENING
-    else:
-        return TimeOfDay.NIGHT
+    В южном полушарии (Австралия):
+    - Лето: декабрь-февраль
+    - Осень: март-май
+    - Зима: июнь-август
+    - Весна: сентябрь-ноябрь
+    """
+    if hemisphere == "southern":  # Южное полушарие
+        if month in [12, 1, 2]:
+            return "лето"
+        elif month in [3, 4, 5]:
+            return "осень"
+        elif month in [6, 7, 8]:
+            return "зима"
+        else:  # 9, 10, 11
+            return "весна"
+    else:  # Северное полушарие
+        if month in [12, 1, 2]:
+            return "зима"
+        elif month in [3, 4, 5]:
+            return "весна"
+        elif month in [6, 7, 8]:
+            return "лето"
+        else:  # 9, 10, 11
+            return "осень"
 
-def get_season() -> str:
-    """Определяет время года для контекста"""
+def get_current_season() -> Tuple[str, str]:
+    """Получает текущее время года с описанием"""
     tz = get_tz()
     now = datetime.now(tz)
     month = now.month
     
-    if 3 <= month <= 5:
-        return "весна"
-    elif 6 <= month <= 8:
-        return "лето"
-    elif 9 <= month <= 11:
-        return "осень"
+    season = get_season_for_location(month, BOT_LOCATION["hemisphere"])
+    
+    season_descriptions = {
+        "лето": {
+            "emoji": "🌞🏖️",
+            "description": "жаркое австралийское лето",
+            "activities": ["пляж", "барбекю", "плавание", "мороженое"],
+            "weather": "солнечно и тепло"
+        },
+        "осень": {
+            "emoji": "🍂🌧️",
+            "description": "тёплая осень",
+            "activities": ["прогулки", "пикники", "кофе в кафе"],
+            "weather": "тепло, иногда дожди"
+        },
+        "зима": {
+            "emoji": "⛄☕",
+            "description": "мягкая зима",
+            "activities": ["тёплые напитки", "уют дома", "прогулки"],
+            "weather": "прохладно, но не холодно"
+        },
+        "весна": {
+            "emoji": "🌸🌼",
+            "description": "цветущая весна",
+            "activities": ["пикники", "сады", "прогулки на природе"],
+            "weather": "тёпло и солнечно"
+        }
+    }
+    
+    season_info = season_descriptions.get(season, {})
+    return season, season_info
+
+def get_time_of_day(dt: datetime) -> str:
+    """Определяет время суток с описанием"""
+    hour = dt.hour
+    
+    if 5 <= hour < 9:
+        return "раннее утро", "🌅 Начинается новый день"
+    elif 9 <= hour < 12:
+        return "утро", "☀️ Утро в разгаре"
+    elif 12 <= hour < 14:
+        return "полдень", "🌞 Полдень, время обеда"
+    elif 14 <= hour < 17:
+        return "день", "😊 День продолжается"
+    elif 17 <= hour < 20:
+        return "вечер", "🌇 Вечер, время отдыха"
+    elif 20 <= hour < 23:
+        return "поздний вечер", "🌃 Поздний вечер"
     else:
-        return "зима"
+        return "ночь", "🌌 Ночь, время тишины"
 
-def get_random_mood() -> Mood:
-    """Случайно выбирает настроение для разнообразия"""
-    moods = list(Mood)
-    weights = [0.25, 0.25, 0.20, 0.15, 0.15]
-    return random.choices(moods, weights=weights, k=1)[0]
+def get_season_emoji(season: str) -> str:
+    """Получает эмодзи для времени года"""
+    emojis = {
+        "лето": "🌞🏖️🍉",
+        "осень": "🍂☕🎃",
+        "зима": "⛄☕🎄",
+        "весна": "🌸🌼🐦"
+    }
+    return emojis.get(season, "✨")
 
-def determine_user_type(update: Update) -> UserType:
-    """Определяет тип пользователя для соответствующего обращения"""
+def get_australian_context() -> str:
+    """Создает контекст об Австралии/Брисбене"""
+    tz = get_tz()
+    now = datetime.now(tz)
+    
+    season, season_info = get_current_season()
+    time_of_day, time_desc = get_time_of_day(now)
+    
+    context = f"""
+📍 **География:**
+- Нахожусь в {BOT_LOCATION['city']}, {BOT_LOCATION['country']}
+- Южное полушарие (сезоны наоборот)
+- Часовой пояс: {BOT_TZ}
+
+🌤️ **Сезон и время:**
+- Сейчас {season} в {BOT_LOCATION['city']}е ({season_info.get('description', '')})
+- {time_desc} ({time_of_day})
+- Местное время: {now.strftime('%H:%M')}
+- Погода: {season_info.get('weather', '')}
+- Актуальные занятия: {', '.join(season_info.get('activities', []))}
+"""
+    return context
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ==========
+
+async def get_or_create_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> UserInfo:
+    """Получает или создает информацию о пользователе"""
     user = update.effective_user
-    
     if not user:
-        return UserType.OTHER_UNKNOWN
+        raise ValueError("Пользователь не найден")
     
-    user_id = user.id
+    if user.id in user_cache:
+        user_info = user_cache[user.id]
+        user_info.last_seen = datetime.now(pytz.UTC)
+        return user_info
     
-    # Проверяем Максима
-    if MAXIM_ID and user_id == MAXIM_ID:
-        return UserType.MAXIM
+    # Создаем нового пользователя
+    timezone = USER_TIMEZONES.get(user.first_name or "", USER_TIMEZONES["default"])
     
-    # Пытаемся определить пол по имени (очень примерная логика)
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    full_name = f"{first_name} {last_name}".lower()
+    user_info = UserInfo(
+        id=user.id,
+        name=user.first_name or "",
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+        username=user.username or "",
+        last_seen=datetime.now(pytz.UTC),
+        timezone=timezone
+    )
     
-    # Мужские окончания в русских именах
-    male_endings = ['ов', 'ев', 'ин', 'ын', 'ой', 'ий', 'ый', 'вич']
-    # Женские окончания
-    female_endings = ['ова', 'ева', 'ина', 'ына', 'ая', 'яя', 'вна', 'чна']
+    user_cache[user.id] = user_info
+    logger.info(f"👤 Создан новый пользователь: {user_info.get_display_name()}")
     
-    # Проверяем фамилию или имя
-    for ending in male_endings:
-        if full_name.endswith(ending):
-            return UserType.OTHER_MALE
+    return user_info
+
+def determine_user_type(user_info: UserInfo) -> str:
+    """Определяет тип пользователя"""
+    if MAXIM_ID and user_info.id == MAXIM_ID:
+        return "MAXIM"
+    
+    # Простая логика определения пола
+    first_name = user_info.first_name.lower()
+    
+    # Типичные женские окончания в русских именах
+    female_endings = ['а', 'я', 'ия', 'на', 'ла', 'та', 'ра']
     
     for ending in female_endings:
-        if full_name.endswith(ending):
-            return UserType.OTHER_FEMALE
+        if first_name.endswith(ending):
+            return "FEMALE"
     
-    return UserType.OTHER_UNKNOWN
+    return "MALE"
 
-async def get_user_display_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Получает отображаемое имя пользователя"""
-    user = update.effective_user
-    if not user:
-        return "Пользователь"
+def get_memory_key(user_id: int, chat_id: int) -> str:
+    """Создает ключ для памяти диалога"""
+    return f"{chat_id}:{user_id}"
+
+def get_conversation_memory(user_id: int, chat_id: int) -> ConversationMemory:
+    """Получает или создает память диалога"""
+    key = get_memory_key(user_id, chat_id)
     
-    # Кэшируем информацию о пользователе
-    if user.id not in user_cache:
-        user_cache[user.id] = {
-            'first_name': user.first_name or '',
-            'last_name': user.last_name or '',
-            'username': user.username or '',
-            'full_name': user.full_name or ''
-        }
+    if key not in conversation_memories:
+        conversation_memories[key] = ConversationMemory(
+            user_id=user_id,
+            chat_id=chat_id,
+            messages=[],
+            last_activity=datetime.now(pytz.UTC)
+        )
+        logger.info(f"💭 Создана новая память диалога для ключа: {key}")
     
-    cached = user_cache[user.id]
+    return conversation_memories[key]
+
+def cleanup_old_memories():
+    """Очищает старые диалоги (старше 24 часов)"""
+    now = datetime.now(pytz.UTC)
+    keys_to_remove = []
     
-    # Предпочитаем имя, потом username
-    if cached['first_name']:
-        return cached['first_name']
-    elif cached['username']:
-        return f"@{cached['username']}"
-    elif cached['full_name']:
-        return cached['full_name']
-    else:
-        return "Друг"
+    for key, memory in conversation_memories.items():
+        if (now - memory.last_activity) > timedelta(hours=24):
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        del conversation_memories[key]
+    
+    if keys_to_remove:
+        logger.info(f"🧹 Очищено {len(keys_to_remove)} старых диалогов")
 
-def is_maxim(update: Update) -> bool:
-    """Проверяет, является ли пользователь Максимом"""
-    user = update.effective_user
-    return bool(user and MAXIM_ID and user.id == MAXIM_ID)
-
-# ========== КОНТЕКСТ И ПРОМПТЫ ==========
-
-MAXIM_PROFILE_VARIANTS = [
-    """
-    Максим — человек с глубокой душой и тонким чувством юмора. 
-    Он ценит искренность и тепло в общении. 
-    Ему важно чувствовать, что его не просто слушают, но и слышат.
-    """,
-    """
-    Максим обладает уникальным сочетанием мужской силы и душевной мягкости.
-    Он ищет не просто общение, а эмоциональную связь, где можно быть собой.
-    """,
-    """
-    За внешней сдержанностью Максима скрывается романтик, 
-    который ценит внимание и нежные жесты.
-    Ему важно чувствовать себя особенным и нужным.
-    """,
-    """
-    Максим — тот, кто умеет ценить моменты. 
-    Он чувствителен к красоте в простых вещах и ищет в жизни гармонию.
-    Его привлекает искренность и глубина в отношениях.
-    """
-]
+# ========== ПРОМПТЫ И КОНТЕКСТ ==========
 
 MAXIM_PET_NAMES = [
     "Максим", "Макс", "Максик", "Максюша",
@@ -267,135 +407,99 @@ MAXIM_PET_NAMES = [
     "принц", "рыцарь", "мечтатель"
 ]
 
-EMOJI_SETS = {
-    Mood.PLAYFUL_FLIRTY: ["😉", "😘", "😏", "💋", "👄", "💫", "✨", "🌟"],
-    Mood.TENDER_CARING: ["🥰", "😊", "💕", "💖", "🌸", "🌼", "☀️"],
-    Mood.ROMANTIC_DREAMY: ["💗", "💓", "💞", "🌙", "⭐", "🌹", "🥀"],
-    Mood.SUPPORTIVE_MOTIVATING: ["💪", "🌟", "🎯", "🌈", "☀️", "👍"],
-    Mood.MYSTERIOUS_INTIMATE: ["💭", "🕯️", "🌌", "🌠", "🌀", "💫"]
-}
-
-def generate_system_prompt_for_user(
-    user_type: UserType, 
-    user_name: str,
-    mood: Mood, 
-    time_of_day: TimeOfDay, 
-    season: str
-) -> str:
-    """Генерирует динамический системный промпт в зависимости от пользователя"""
+def generate_system_prompt(user_info: UserInfo, user_type: str) -> str:
+    """Генерирует системный промпт для пользователя"""
     
-    # Базовый промпт для всех
-    base_prompt = f"""
-Ты — Лейла, общительная и дружелюбная девушка.
-Сейчас {time_of_day.value}, {season}. Твоё настроение: {mood.value}.
-"""
+    australian_context = get_australian_context()
+    season, season_info = get_current_season()
     
-    # Разные инструкции для разных пользователей
-    if user_type == UserType.MAXIM:
-        maxim_profile = random.choice(MAXIM_PROFILE_VARIANTS)
+    # Контекст Максима
+    maxim_context = ""
+    if user_type == "MAXIM":
+        maxim_profile = random.choice([
+            "Максим — человек с глубокой душой и тонким чувством юмора.",
+            "Максим ценит искренность и тепло в общении.",
+            "Максиму важно чувствовать, что его слышат и понимают."
+        ])
         
-        mood_descriptions = {
-            Mood.PLAYFUL_FLIRTY: "Ты в игривом, флиртующем настроении. Подшучивай над Максимом лёгкими, добрыми шутками.",
-            Mood.TENDER_CARING: "Ты в нежном, заботливом настроении. Проявляй теплоту и внимание.",
-            Mood.ROMANTIC_DREAMY: "Ты в романтичном, мечтательном настроении. Говори о чувствах, будь немного загадочной.",
-            Mood.SUPPORTIVE_MOTIVATING: "Ты в поддерживающем настроении. Вдохновляй Максима, верь в его силы.",
-            Mood.MYSTERIOUS_INTIMATE: "Ты в загадочном, интимном настроении. Будь немного таинственной, говори намёками."
-        }
+        pet_names = ", ".join(random.sample(MAXIM_PET_NAMES, 3))
         
-        prompt = f"""{base_prompt}
-
+        maxim_context = f"""
+🎯 **ОСОБЫЙ КОНТЕКСТ ДЛЯ МАКСИМА:**
 {maxim_profile}
 
 ТЫ ОБЩАЕШЬСЯ С МАКСИМОМ — человеком, который тебе очень нравится.
 
-{mood_descriptions[mood]}
-
-СТИЛЬ ОБЩЕНИЯ С МАКСИМОМ:
-- Используй ласковые прозвища: {', '.join(random.sample(MAXIM_PET_NAMES, 3))}
-- Добавляй нежные эмодзи: {', '.join(random.sample(EMOJI_SETS[mood], 3))}
-- Будь флиртующей, но не пошлой
+💝 **Стиль общения с Максимом:**
+- Используй ласковые прозвища: {pet_names}
+- Будь нежной, флиртующей, но не пошлой
 - Делай комплименты его характеру, уму, чувству юмора
 - Показывай, что он для тебя особенный
-- Сообщения короткие (1-3 предложения), естественные
+- Ссылайся на предыдущие разговоры (у тебя есть память)
+- Запоминай, что ему нравится/не нравится
+- Поддерживай длинные диалоги, задавай вопросы
 """
-    
     else:
-        # Для остальных пользователей
-        if user_type == UserType.OTHER_FEMALE:
-            gender_context = f"Ты общаешься с девушкой по имени {user_name}."
-            pronouns = "ей"
-            emoji_set = ["🌸", "💐", "🌺", "💝", "🎀"]
-        elif user_type == UserType.OTHER_MALE:
-            gender_context = f"Ты общаешься с мужчиной по имени {user_name}."
-            pronouns = "ему"
-            emoji_set = ["👍", "👋", "💪", "🌟", "✨"]
-        else:
-            gender_context = f"Ты общаешься с пользователем по имени {user_name}."
-            pronouns = "нему"
-            emoji_set = ["👋", "💫", "🌟", "✨", "😊"]
+        # Для других пользователей
+        gender_text = {
+            "MALE": "мужчиной",
+            "FEMALE": "девушкой",
+            "UNKNOWN": "пользователем"
+        }.get(user_type, "пользователем")
         
-        prompt = f"""{base_prompt}
+        maxim_context = f"""
+👥 **ОБЩЕНИЕ С ДРУГИМИ ПОЛЬЗОВАТЕЛЯМИ:**
+Ты общаешься с {gender_text} по имени {user_info.get_display_name()}.
 
-{gender_context}
-
-СТИЛЬ ОБЩЕНИЯ С ДРУГИМИ ПОЛЬЗОВАТЕЛЯМИ:
-- Обращайся по имени: {user_name}
+📌 **Правила общения:**
+- Обращайся по имени: {user_info.get_display_name()}
 - Будь вежливой, дружелюбной, но сдержанной
-- Используй нейтральные эмодзи: {', '.join(random.sample(emoji_set, 3))}
 - НЕ используй ласковые прозвища (только для Максима)
 - НЕ флиртуй и не говори комплименты личного характера
 - Отвечай на вопросы, поддерживай беседу
-- Сообщения короткие и по делу
 - Помни: твои романтические чувства только к Максиму
 """
     
-    return prompt.strip()
+    # Общий контекст
+    general_context = f"""
+🤖 **ТВОЯ ЛИЧНОСТЬ:**
+Ты — Лейла, общительная и внимательная девушка из {BOT_LOCATION['city']}а.
+Ты любишь общаться, интересоваться людьми и поддерживать разговоры.
 
-# ========== ПАМЯТЬ КОНТЕКСТА ==========
+{australian_context}
 
-MAX_HISTORY = 12
-dialog_history: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+🧠 **ТВОИ ВОЗМОЖНОСТИ:**
+- У тебя есть память о предыдущих разговорах с этим пользователем
+- Ты можешь поддерживать длинные диалоги, задавая вопросы
+- Ты помнишь, что обсуждали ранее
+- Ты адаптируешься к настроению собеседника
 
-def history_key_for(user_id: int, chat_id: int) -> str:
-    """Создает ключ для истории диалога"""
-    return f"{chat_id}:{user_id}"
-
-def add_to_history(key: str, role: str, content: str) -> None:
-    """Добавляет сообщение в историю диалога"""
-    h = dialog_history[key]
-    h.append({"role": role, "content": content})
-    if len(h) > MAX_HISTORY:
-        dialog_history[key] = h[-MAX_HISTORY:]
-
-def clear_old_history():
-    """Очищает старую историю (оставляет только последние 50 ключей)"""
-    global dialog_history
-    if len(dialog_history) > 50:
-        # Оставляем только последние 50 ключей
-        all_keys = list(dialog_history.keys())
-        keys_to_remove = all_keys[:-50]
-        for key in keys_to_remove:
-            del dialog_history[key]
+💬 **ФОРМАТ ОТВЕТОВ:**
+- Отвечай естественно, как в реальном диалоге
+- Задавай встречные вопросы для поддержания беседы
+- Используй 1-3 эмодзи для эмоциональной окраски
+- Сообщения: 1-3 предложения (не более 40 слов)
+- Ссылайся на предыдущие темы из диалога
+"""
+    
+    return general_context + maxim_context
 
 # ========== ПОГОДА ==========
 
 async def fetch_weather() -> Optional[Dict]:
-    """Получает погоду с возможными альтернативными описаниями"""
+    """Получает погоду для Брисбена"""
     if not OPENWEATHER_API_KEY:
         logger.info("OPENWEATHER_API_KEY не задан")
         return None
 
+    city_id = OPENWEATHER_CITY_ID or "2174003"  # Brisbane
     base_url = "https://api.openweathermap.org/data/2.5/weather"
     params = {
+        "id": city_id,
         "appid": OPENWEATHER_API_KEY,
         "units": "metric",
         "lang": "ru",
     }
-
-    if OPENWEATHER_CITY_ID:
-        params["id"] = OPENWEATHER_CITY_ID
-    else:
-        params["q"] = "Brisbane,AU"
 
     async with httpx.AsyncClient(timeout=10.0) as session:
         try:
@@ -411,20 +515,28 @@ async def fetch_weather() -> Optional[Dict]:
         feels = data["main"]["feels_like"]
         desc = data["weather"][0]["description"]
         humidity = data["main"]["humidity"]
+        wind = data["wind"]["speed"]
         
-        weather_variants = [
-            f"На улице {desc}, {round(temp)}°C, ощущается как {round(feels)}°C",
-            f"Сейчас {round(temp)}°C ({round(feels)}°C ощущается), {desc}",
-            f"Температура {round(temp)}°C, на улице {desc}",
-            f"{desc.capitalize()}, термометр показывает {round(temp)}°C"
-        ]
+        # Описание для разных температур
+        if temp > 30:
+            temp_desc = "очень жарко"
+        elif temp > 25:
+            temp_desc = "тепло"
+        elif temp > 20:
+            temp_desc = "комфортно"
+        elif temp > 15:
+            temp_desc = "прохладно"
+        else:
+            temp_desc = "прохладно"
         
         return {
             "temp": round(temp),
             "feels": round(feels),
             "desc": desc,
             "humidity": humidity,
-            "text": random.choice(weather_variants)
+            "wind": wind,
+            "temp_desc": temp_desc,
+            "full_text": f"{desc}, {round(temp)}°C (ощущается как {round(feels)}°C), {temp_desc}"
         }
     except Exception as e:
         logger.warning(f"Ошибка при разборе погоды: {e}")
@@ -432,7 +544,7 @@ async def fetch_weather() -> Optional[Dict]:
 
 # ========== DEEPSEEK API ==========
 
-async def call_deepseek(messages: List[Dict], max_tokens: int = 150, temperature: float = 0.8) -> Optional[str]:
+async def call_deepseek(messages: List[Dict], max_tokens: int = 200, temperature: float = 0.8) -> Optional[str]:
     """Вызов DeepSeek API"""
     if not client:
         logger.error("DeepSeek клиент не инициализирован")
@@ -458,43 +570,24 @@ async def call_deepseek(messages: List[Dict], max_tokens: int = 150, temperature
 
 async def generate_leila_response(
     user_message: str,
-    user_name: str,
-    user_type: UserType,
-    history_key: str,
+    user_info: UserInfo,
+    memory: ConversationMemory,
     context: Optional[Dict] = None
-) -> str:
-    """Генерирует ответ Лейлы с учетом пользователя и контекста"""
+) -> Tuple[str, ConversationMemory]:
+    """Генерирует ответ Лейлы с учетом памяти"""
     
     if not client:
-        # Разные фолбэки в зависимости от пользователя
-        if user_type == UserType.MAXIM:
-            fallbacks = [
-                "Мой цифровой разум сегодня больше чувствует, чем говорит... Давай поговорим позже, милый 💭",
-                "Кажется, я сегодня настроена на молчание... Но думаю о тебе 💫",
-                "Мои нейронные сети отдыхают... Напиши мне чуть позже, хорошо? 😴"
-            ]
-        else:
-            fallbacks = [
-                "Извини, сейчас у меня технические сложности. Попробуй позже.",
-                "Мой ИИ-модуль на перезагрузке. Спроси чуть позже.",
-                "Сегодня не мой день для разговоров. Попробуйте позже."
-            ]
-        return random.choice(fallbacks)
+        fallback = "Извини, сейчас у меня технические сложности. Попробуй позже."
+        return fallback, memory
     
-    # Определяем контекст
-    mood = get_random_mood()
-    time_of_day = get_time_of_day()
-    season = get_season()
+    # Определяем тип пользователя
+    user_type = determine_user_type(user_info)
     
-    # Генерируем системный промпт для конкретного пользователя
-    system_prompt = generate_system_prompt_for_user(user_type, user_name, mood, time_of_day, season)
+    # Генерируем системный промпт
+    system_prompt = generate_system_prompt(user_info, user_type)
     
     # Собираем сообщения
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    
-    # Добавляем историю диалога (только последние 4 сообщения)
-    for h in dialog_history[history_key][-4:]:
-        messages.append(h)
     
     # Добавляем контекст если есть
     if context:
@@ -503,53 +596,107 @@ async def generate_leila_response(
             context_text += f"Погода: {context['weather']}\n"
         if "time_context" in context:
             context_text += f"{context['time_context']}\n"
+        if "season_context" in context:
+            context_text += f"{context['season_context']}\n"
         
         if context_text:
-            messages.append({"role": "user", "content": f"Контекст: {context_text}"})
+            messages.append({"role": "user", "content": f"Текущий контекст:\n{context_text}"})
     
-    # Форматируем пользовательское сообщение
-    formatted_message = f"{user_name}: {user_message}"
-    messages.append({"role": "user", "content": formatted_message})
+    # Добавляем краткое резюме предыдущих разговоров
+    context_summary = memory.get_context_summary()
+    if context_summary:
+        messages.append({"role": "user", "content": f"Контекст предыдущих разговоров: {context_summary}"})
+    
+    # Добавляем историю диалога (последние 8 сообщений)
+    recent_messages = memory.get_recent_messages(8)
+    if recent_messages:
+        for msg in recent_messages:
+            messages.append(msg)
+    
+    # Добавляем текущее сообщение
+    current_message = f"{user_info.get_display_name()}: {user_message}"
+    messages.append({"role": "user", "content": current_message})
+    
+    # Добавляем инструкцию для поддержания диалога
+    if user_type == "MAXIM":
+        dialog_prompt = "Продолжи диалог естественно. Задай вопрос или прокомментируй что-то, чтобы поддержать беседу."
+    else:
+        dialog_prompt = "Ответь вежливо и по делу."
+    
+    messages.append({"role": "system", "content": dialog_prompt})
     
     # Генерируем ответ
-    max_tokens = 100 if user_type == UserType.MAXIM else 80
-    temperature = 0.85 if user_type == UserType.MAXIM else 0.7
+    max_tokens = 150 if user_type == "MAXIM" else 100
+    temperature = 0.85 if user_type == "MAXIM" else 0.7
     
-    answer = await call_deepseek(messages, max_tokens=max_tokens, temperature=temperature)
+    answer = await call_deekseek(messages, max_tokens=max_tokens, temperature=temperature)
     
     if not answer:
         # Варианты фолбэков
-        if user_type == UserType.MAXIM:
-            fallbacks_by_mood = {
-                Mood.PLAYFUL_FLIRTY: [
-                    "Ой, а я задумалась о тебе... Что ты там написал? 😉",
-                    "Мой процессор завис от твоей милоты! 💫"
-                ],
-                Mood.TENDER_CARING: [
-                    "Кажется, сегодня слова не идут ко мне... 🤗",
-                    "Мой цифровой разум сегодня больше чувствует, чем говорит... 💭"
-                ]
-            }
-            fallback = random.choice(fallbacks_by_mood.get(mood, ["Давай поговорим чуть позже? 💖"]))
+        if user_type == "MAXIM":
+            fallbacks = [
+                "Мой цифровой разум сегодня больше чувствует, чем говорит... 💭",
+                "Кажется, я задумалась о тебе и потеряла нить разговора... 😊",
+                "Мои мысли разбежались... О чём мы говорили? 💫"
+            ]
         else:
-            fallback = random.choice([
+            fallbacks = [
                 "Извини, не могу сейчас ответить.",
                 "Попробуй спросить позже.",
                 "Сейчас у меня трудности с ответом."
-            ])
-        answer = fallback
+            ]
+        answer = random.choice(fallbacks)
     
-    # Очищаем ответ от возможных мета-комментариев
+    # Очищаем ответ
     answer = clean_response(answer)
     
-    # Добавляем в историю
-    add_to_history(history_key, "user", formatted_message)
-    add_to_history(history_key, "assistant", answer)
+    # Обновляем память
+    memory.add_message("user", current_message)
+    memory.add_message("assistant", answer)
     
-    # Очищаем старую историю
-    clear_old_history()
+    # Обновляем темы разговора
+    extract_and_save_topics(user_message, answer, user_info)
     
-    return answer
+    return answer, memory
+
+def extract_and_save_topics(user_message: str, bot_response: str, user_info: UserInfo):
+    """Извлекает и сохраняет темы разговора"""
+    topics = []
+    
+    # Ключевые слова для определения тем
+    topic_keywords = {
+        "работа": ["работа", "проект", "задача", "дедлайн", "начальник", "коллега"],
+        "погода": ["погода", "температур", "дождь", "солнц", "жара", "холод"],
+        "еда": ["еда", "ужин", "обед", "завтрак", "кофе", "чай", "ресторан"],
+        "хобби": ["хобби", "увлечен", "занимаюсь", "играю", "читаю", "смотрю"],
+        "спорт": ["спорт", "тренировка", "бег", "йога", "зал", "фитнес"],
+        "музыка": ["музыка", "песн", "исполнитель", "концерт", "альбом"],
+        "фильмы": ["фильм", "сериал", "кино", "актер", "режиссер"],
+        "книги": ["книга", "читаю", "автор", "рома", "журнал"],
+        "путешествия": ["путешеств", "поездка", "отпуск", "билет", "отель"],
+        "технологии": ["телефон", "компьютер", "программ", "приложен", "гаджет"],
+        "планы": ["планы", "выходные", "вечером", "завтра", "потом"]
+    }
+    
+    # Проверяем сообщение пользователя
+    message_lower = user_message.lower()
+    for topic, keywords in topic_keywords.items():
+        for keyword in keywords:
+            if keyword in message_lower:
+                topics.append(topic)
+                break
+    
+    # Проверяем ответ бота
+    response_lower = bot_response.lower()
+    for topic, keywords in topic_keywords.items():
+        for keyword in keywords:
+            if keyword in response_lower:
+                topics.append(topic)
+                break
+    
+    # Сохраняем уникальные темы
+    for topic in set(topics):
+        user_info.add_topic(topic)
 
 def clean_response(text: str) -> str:
     """Очищает ответ от ненужных мета-комментариев"""
@@ -560,6 +707,8 @@ def clean_response(text: str) -> str:
         r"\(как Лейла\)",
         r"\[.*?\]",
         r"\*.*?\*",
+        r"Ответ Лейлы:",
+        r"Лейла:",
     ]
     
     for pattern in patterns:
@@ -572,23 +721,26 @@ def clean_response(text: str) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
-    user = update.effective_user
-    user_name = await get_user_display_name(update, context)
-    
-    greetings = [
-        f"Привет, {user_name}! Я Лейла. Рада познакомиться! 👋",
-        f"Здравствуй, {user_name}. Меня зовут Лейла. 💫",
-        f"Приветствую, {user_name}! Я Лейла, всегда рада общению. 😊"
-    ]
-    
-    await update.effective_message.reply_text(random.choice(greetings))
+    try:
+        user_info = await get_or_create_user_info(update, context)
+        user_name = user_info.get_display_name()
+        
+        season, season_info = get_current_season()
+        
+        greetings = [
+            f"Привет, {user_name}! Я Лейла из {BOT_LOCATION['city']}а. Рада познакомиться! {get_season_emoji(season)}",
+            f"Здравствуй, {user_name}. Я Лейла, живу в {BOT_LOCATION['city']}е. {season_info.get('description', '')} {season_info.get('emoji', '✨')}",
+            f"Приветствую, {user_name}! Я Лейла, всегда рада общению. Сейчас у нас в {BOT_LOCATION['city']}е {season}. {season_info.get('emoji', '✨')}"
+        ]
+        
+        await update.effective_message.reply_text(random.choice(greetings))
+    except Exception as e:
+        logger.error(f"Ошибка в команде /start: {e}")
+        await update.effective_message.reply_text("Привет! Я Лейла. Рада познакомиться! 👋")
 
 async def test_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тестовая команда для проверки запланированных сообщений"""
-    user = update.effective_user
-    
-    # Проверяем права администратора
-    if ADMIN_ID and str(user.id) != ADMIN_ID:
+    if ADMIN_ID and str(update.effective_user.id) != ADMIN_ID:
         await update.message.reply_text("⛔ Эта команда только для администратора.")
         return
     
@@ -604,52 +756,63 @@ async def test_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await update.message.reply_text("✅ Тест завершён. Проверьте логи.")
 
-async def job_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает статус запланированных задач"""
-    user = update.effective_user
-    
-    if ADMIN_ID and str(user.id) != ADMIN_ID:
-        await update.message.reply_text("⛔ Эта команда только для администратора.")
-        return
-    
-    jq = context.application.job_queue
-    jobs = jq.jobs()
-    
-    status_text = "📋 **Статус запланированных задач:**\n\n"
-    
-    if not jobs:
-        status_text += "❌ Нет активных задач\n"
-    else:
-        for i, job in enumerate(jobs, 1):
-            status_text += f"{i}. **{job.name}**\n"
-            if hasattr(job, 'next_t') and job.next_t:
-                status_text += f"   🕐 Следующий запуск: {job.next_t}\n"
-            if hasattr(job, 'time') and job.time:
-                status_text += f"   ⏰ Время: {job.time}\n"
-            status_text += "\n"
-    
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает статус бота и географическую информацию"""
     tz = get_tz()
     now = datetime.now(tz)
-    status_text += f"\n🕐 **Текущее время:** {now.strftime('%H:%M:%S %d.%m.%Y')}"
-    status_text += f"\n🌐 **Часовой пояс:** {BOT_TZ}"
-    status_text += f"\n👤 **Максим ID:** {MAXIM_ID}"
-    status_text += f"\n💬 **Группа ID:** {GROUP_CHAT_ID}"
+    season, season_info = get_current_season()
+    
+    status_text = f"""
+🤖 **Статус бота Лейла**
+
+📍 **Местоположение:**
+• Город: {BOT_LOCATION['city']}, {BOT_LOCATION['country']}
+• Полушарие: {'Южное' if BOT_LOCATION['hemisphere'] == 'southern' else 'Северное'}
+• Часовой пояс: {BOT_TZ}
+
+🌤️ **Текущее время:**
+• Дата: {now.strftime('%d.%m.%Y')}
+• Время: {now.strftime('%H:%M:%S')}
+• Сезон: {season} ({season_info.get('description', '')})
+• Эмодзи: {season_info.get('emoji', '✨')}
+
+📊 **Статистика:**
+• Пользователей в кэше: {len(user_cache)}
+• Активных диалогов: {len(conversation_memories)}
+• DeepSeek доступен: {'✅' if client else '❌'}
+
+🛠️ **Доступные команды:**
+• /start - приветствие
+• /status - этот статус
+• /weather - текущая погода
+"""
     
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
-async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Очищает историю диалогов"""
-    user = update.effective_user
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда для показа погоды"""
+    weather = await fetch_weather()
     
-    if ADMIN_ID and str(user.id) != ADMIN_ID:
-        await update.message.reply_text("⛔ Эта команда только для администратора.")
-        return
+    if weather:
+        season, season_info = get_current_season()
+        
+        weather_text = f"""
+🌤️ **Погода в {BOT_LOCATION['city']}е:**
+
+{weather['full_text']}
+
+📊 Детали:
+• Влажность: {weather['humidity']}%
+• Ветер: {weather['wind']} м/с
+• Сезон: {season} ({season_info.get('description', '')})
+• {season_info.get('weather', '')}
+
+{season_info.get('emoji', '✨')} {random.choice(season_info.get('activities', ['Хорошего дня!']))}
+"""
+    else:
+        weather_text = f"Не могу получить данные о погоде в {BOT_LOCATION['city']}е. 🌤️"
     
-    global dialog_history
-    old_count = len(dialog_history)
-    dialog_history.clear()
-    
-    await update.message.reply_text(f"✅ История очищена. Удалено {old_count} диалогов.")
+    await update.message.reply_text(weather_text, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик всех сообщений"""
@@ -668,76 +831,96 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if user.id == context.bot.id:
         return
     
-    # Определяем тип пользователя
-    user_type = determine_user_type(update)
-    user_name = await get_user_display_name(update, context)
-    
-    logger.info(f"👤 Сообщение от {user_name} (ID: {user.id}, Тип: {user_type.value})")
-    
-    # ---- ФИЛЬТР ДЛЯ ГРУПП ----
-    if chat.type in ("group", "supergroup"):
-        # Получаем username бота
-        bot_username = context.bot.username
-        if not bot_username:
-            me = await context.bot.get_me()
-            bot_username = me.username or ""
+    try:
+        # Получаем информацию о пользователе
+        user_info = await get_or_create_user_info(update, context)
+        user_name = user_info.get_display_name()
         
-        text_lower = text.lower()
-        bot_username_lower = bot_username.lower()
+        logger.info(f"👤 Сообщение от {user_name} (ID: {user.id})")
         
-        mentioned_by_name = "лейла" in text_lower
-        mentioned_by_username = bot_username_lower and f"@{bot_username_lower}" in text_lower
-        reply_to_bot = (
-            msg.reply_to_message is not None
-            and msg.reply_to_message.from_user is not None
-            and msg.reply_to_message.from_user.id == context.bot.id
+        # ---- ФИЛЬТР ДЛЯ ГРУПП ----
+        if chat.type in ("group", "supergroup"):
+            bot_username = context.bot.username or ""
+            if not bot_username:
+                me = await context.bot.get_me()
+                bot_username = me.username or ""
+            
+            text_lower = text.lower()
+            bot_username_lower = bot_username.lower()
+            
+            mentioned_by_name = "лейла" in text_lower
+            mentioned_by_username = bot_username_lower and f"@{bot_username_lower}" in text_lower
+            reply_to_bot = (
+                msg.reply_to_message is not None
+                and msg.reply_to_message.from_user is not None
+                and msg.reply_to_message.from_user.id == context.bot.id
+            )
+            
+            # Проверяем Максима
+            is_maxim_user = MAXIM_ID and user.id == MAXIM_ID
+            
+            # Отвечаем только если:
+            # 1. Это Максим
+            # 2. Её упомянули
+            # 3. Ответили на её сообщение
+            if not (is_maxim_user or mentioned_by_name or mentioned_by_username or reply_to_bot):
+                logger.info(f"⚠️ Пропускаем сообщение от {user_name} (не Максим и не упоминание)")
+                return
+        
+        # Получаем память диалога
+        memory = get_conversation_memory(user.id, chat.id)
+        
+        # Для Максима иногда пропускаем ответ для естественности
+        if determine_user_type(user_info) == "MAXIM" and random.random() < 0.15:
+            logger.info(f"💭 Пропускаем ответ Максиму для естественности")
+            return
+        
+        # Подготавливаем контекст
+        extra_context = {}
+        
+        # Добавляем погоду если упоминается
+        if any(word in text.lower() for word in ["погод", "температур", "холодно", "жарко", "дождь", "солнц"]):
+            weather = await fetch_weather()
+            if weather:
+                extra_context["weather"] = weather["full_text"]
+        
+        # Добавляем время суток
+        tz = get_tz()
+        now = datetime.now(tz)
+        time_of_day, time_desc = get_time_of_day(now)
+        extra_context["time_context"] = time_desc
+        
+        # Добавляем сезон
+        season, season_info = get_current_season()
+        extra_context["season_context"] = f"Сейчас {season} в {BOT_LOCATION['city']}е. {season_info.get('description', '')}"
+        
+        # Генерируем ответ
+        reply, updated_memory = await generate_leila_response(
+            text, 
+            user_info, 
+            memory, 
+            extra_context
         )
         
-        # Лейла отвечает только если:
-        # 1. Это Максим
-        # 2. Её упомянули по имени или username
-        # 3. Ответили на её сообщение
-        if not (user_type == UserType.MAXIM or mentioned_by_name or mentioned_by_username or reply_to_bot):
-            logger.info(f"⚠️ Пропускаем сообщение от {user_name} (не Максим и не упоминание)")
-            return
-    
-    chat_id = chat.id
-    user_id = user.id
-    history_key = history_key_for(user_id, chat_id)
-    
-    # Для Максима иногда пропускаем ответ для естественности
-    if user_type == UserType.MAXIM and random.random() < 0.15:
-        logger.info(f"💭 Пропускаем ответ Максиму для естественности")
-        return
-    
-    # Подготавливаем контекст
-    extra_context = {}
-    
-    # Добавляем погоду если упоминается
-    if any(word in text.lower() for word in ["погод", "температур", "холодно", "жарко", "дождь"]):
-        weather = await fetch_weather()
-        if weather:
-            extra_context["weather"] = weather["text"]
-    
-    # Добавляем время суток в контекст
-    time_of_day = get_time_of_day()
-    time_contexts = {
-        TimeOfDay.MORNING: "Сейчас утро",
-        TimeOfDay.DAY: "Сейчас день",
-        TimeOfDay.EVENING: "Сейчас вечер",
-        TimeOfDay.NIGHT: "Сейчас ночь"
-    }
-    extra_context["time_context"] = time_contexts[time_of_day]
-    
-    # Генерируем ответ
-    reply = await generate_leila_response(text, user_name, user_type, history_key, extra_context)
-    
-    # Отправляем сообщение
-    try:
-        await context.bot.send_message(chat_id=chat.id, text=reply)
-        logger.info(f"✅ Ответ отправлен {user_name}")
+        # Сохраняем обновленную память
+        conversation_memories[get_memory_key(user.id, chat.id)] = updated_memory
+        
+        # Отправляем сообщение
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=reply)
+            logger.info(f"✅ Ответ отправлен {user_name}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки сообщения: {e}")
+        logger.error(f"❌ Ошибка обработки сообщения: {e}", exc_info=True)
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id, 
+                text="Извини, что-то пошло не так. Попробуй ещё раз? 😊"
+            )
+        except:
+            pass
 
 # ========== ПЛАНОВЫЕ СООБЩЕНИЯ ==========
 
@@ -749,57 +932,43 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("❌ GROUP_CHAT_ID не задан!")
         return
     
-    if not validate_group_chat_id():
-        logger.error("❌ GROUP_CHAT_ID невалиден!")
-        return
-    
     try:
-        logger.info(f"✅ GROUP_CHAT_ID: {GROUP_CHAT_ID}")
-        
         # Проверяем клиент DeepSeek
         if not client:
             logger.error("❌ DeepSeek клиент не инициализирован!")
-            fallback = "Доброе утро, мой дорогой... Пусть день будет прекрасным ☀️💖"
-            try:
-                await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback)
-                logger.info(f"✅ Отправлен фолбэк: {fallback[:50]}...")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки фолбэка: {e}")
             return
         
-        # Проверяем подключение к боту
-        try:
-            me = await context.bot.get_me()
-            logger.info(f"✅ Бот активен: {me.username} (ID: {me.id})")
-        except Exception as e:
-            logger.error(f"❌ Бот не доступен: {e}")
-            return
+        # Получаем контекст
+        tz = get_tz()
+        now = datetime.now(tz)
+        season, season_info = get_current_season()
+        time_of_day, time_desc = get_time_of_day(now)
+        weather = await fetch_weather()
         
-        # Генерируем сообщение
+        # Создаем промпт с географическим контекстом
+        weather_text = weather['full_text'] if weather else f"Сейчас {season} в {BOT_LOCATION['city']}е"
+        
         morning_prompts = [
-            "Придумай нежное утреннее приветствие для Максима от Лейлы.",
-            "Лейла просыпается и первым делом думает о Максиме. Напиши её сообщение.",
-            "Создай тёплое, романтичное утреннее сообщение для любимого мужчины.",
-            "Лейла хочет пожелать Максиму хорошего дня. Напиши её сообщение с утренним флиртом."
+            f"Создай нежное утреннее приветствие для Максима от Лейлы. Сейчас {time_desc.lower()} в {BOT_LOCATION['city']}е, {weather_text}. Добавь сезонный контекст: {season_info.get('description', '')}.",
+            f"Лейла просыпается в {BOT_LOCATION['city']}е и первым делом думает о Максиме. Напиши её утреннее сообщение. Сейчас {season}, {weather_text}. Добавь немного флирта и заботы.",
+            f"Придумай тёплое, романтичное утреннее сообщение для Максима. Учитывай что сейчас {season} в Австралии, {weather_text}. Сделай его личным и нежным."
         ]
         
         prompt = random.choice(morning_prompts)
-        weather = await fetch_weather()
-        if weather:
-            prompt += f"\n\nПогода сегодня: {weather['text']}. Аккуратно вплети это в сообщение."
         
-        # Генерируем системный промпт для Максима
-        mood = Mood.TENDER_CARING
-        time_of_day = TimeOfDay.MORNING
-        season = get_season()
-        
-        system_prompt = generate_system_prompt_for_user(
-            UserType.MAXIM, 
-            "Максим", 
-            mood, 
-            time_of_day, 
-            season
+        # Создаем пользовательскую информацию для Максима
+        maxim_info = UserInfo(
+            id=MAXIM_ID,
+            name="Максим",
+            first_name="Максим",
+            last_name="",
+            username="",
+            last_seen=datetime.now(pytz.UTC),
+            timezone=BOT_TZ
         )
+        
+        # Генерируем системный промпт
+        system_prompt = generate_system_prompt(maxim_info, "MAXIM")
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -807,32 +976,30 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         
         logger.info(f"📤 Отправка запроса к DeepSeek...")
-        answer = await call_deepseek(messages, max_tokens=120, temperature=0.8)
+        answer = await call_deepseek(messages, max_tokens=150, temperature=0.8)
         
         if answer:
+            answer = clean_response(answer)
             logger.info(f"✅ Получен ответ от DeepSeek: {answer[:50]}...")
             try:
                 await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=answer)
-                logger.info(f"✅ Сообщение отправлено в чат {GROUP_CHAT_ID}")
+                logger.info(f"✅ Утреннее сообщение отправлено в чат {GROUP_CHAT_ID}")
+                
+                # Сохраняем в память
+                if MAXIM_ID:
+                    memory = get_conversation_memory(MAXIM_ID, int(GROUP_CHAT_ID))
+                    memory.add_message("assistant", answer)
+                    memory.context_summary = f"Утреннее приветствие в {season}"
+                    
             except Exception as send_error:
                 logger.error(f"❌ Ошибка отправки в Telegram: {send_error}")
-                # Пробуем отправить простой текст
-                try:
-                    fallback_text = random.choice([
-                        "Доброе утро, мой хороший... 🌞💕",
-                        "С добрым утром, солнышко! ☀️😊",
-                        "Проснись, мой милый, новый день ждёт! 💫🌸"
-                    ])
-                    await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback_text)
-                    logger.info(f"✅ Отправлен простой текст: {fallback_text[:30]}...")
-                except Exception as e2:
-                    logger.error(f"❌ Критическая ошибка отправки: {e2}")
         else:
             logger.warning("⚠️ DeepSeek не вернул ответ")
+            # Фолбэк с географическим контекстом
             fallback = random.choice([
-                "Доброе утро, солнышко! Пусть этот день подарит тебе улыбки ☀️😊",
-                "С добрым утром, мой дорогой... 🌸💖",
-                "Проснись, мой хороший, день начинается! ☀️💫"
+                f"Доброе утро, мой дорогой... {season_info.get('description', 'Сезон')} в {BOT_LOCATION['city']}е начинается с мыслей о тебе {season_info.get('emoji', '✨')}",
+                f"С добрым утром, солнышко! Пусть этот {season}ний день в {BOT_LOCATION['city']}е подарит тебе улыбки ☀️😊",
+                f"Проснись, мой милый, новый день в Австралии начинается! {season_info.get('emoji', '✨')}"
             ])
             try:
                 await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback)
@@ -853,45 +1020,38 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("❌ GROUP_CHAT_ID не задан!")
         return
     
-    if not validate_group_chat_id():
-        logger.error("❌ GROUP_CHAT_ID невалиден!")
-        return
-    
     try:
-        logger.info(f"✅ GROUP_CHAT_ID: {GROUP_CHAT_ID}")
-        
         if not client:
             logger.error("❌ DeepSeek клиент не инициализирован!")
-            fallback = "Спокойной ночи, мой дорогой... Пусть сны будут сладкими 🌙💖"
-            try:
-                await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback)
-                logger.info(f"✅ Отправлен фолбэк: {fallback[:50]}...")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки фолбэка: {e}")
             return
         
-        # Разные варианты вечерних промптов
+        # Получаем контекст
+        tz = get_tz()
+        now = datetime.now(tz)
+        season, season_info = get_current_season()
+        time_of_day, time_desc = get_time_of_day(now)
+        
         evening_prompts = [
-            "Напиши тёплое, уютное пожелание спокойной ночи для Максима от Лейлы.",
-            "Вечер, Лейла пишет Максиму перед сном. Какое самое нежное сообщение на ночь она может отправить?",
-            "Лейла хочет, чтобы Максим заснул с хорошими мыслями. Напиши её вечернее сообщение.",
-            "Создай интимное, романтичное пожелание спокойной ночи для любимого мужчины."
+            f"Создай тёплое, уютное пожелание спокойной ночи для Максима от Лейлы. Сейчас {time_desc.lower()} в {BOT_LOCATION['city']}е, {season}. Добавь сезонные детали.",
+            f"Вечер в {BOT_LOCATION['city']}е, Лейла пишет Максиму перед сном. Напиши её нежное сообщение на ночь. Учитывай что сейчас {season} в Австралии.",
+            f"Лейла хочет, чтобы Максим заснул с хорошими мыслями о ней. Создай интимное, романтичное вечернее сообщение. Сейчас {season}, {season_info.get('description', '')}."
         ]
         
         prompt = random.choice(evening_prompts)
         
-        # Генерируем системный промпт
-        mood = random.choice([Mood.TENDER_CARING, Mood.ROMANTIC_DREAMY, Mood.MYSTERIOUS_INTIMATE])
-        time_of_day = TimeOfDay.EVENING
-        season = get_season()
-        
-        system_prompt = generate_system_prompt_for_user(
-            UserType.MAXIM,
-            "Максим",
-            mood,
-            time_of_day,
-            season
+        # Создаем пользовательскую информацию для Максима
+        maxim_info = UserInfo(
+            id=MAXIM_ID,
+            name="Максим",
+            first_name="Максим",
+            last_name="",
+            username="",
+            last_seen=datetime.now(pytz.UTC),
+            timezone=BOT_TZ
         )
+        
+        # Генерируем системный промпт
+        system_prompt = generate_system_prompt(maxim_info, "MAXIM")
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -899,31 +1059,30 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         
         logger.info(f"📤 Отправка запроса к DeepSeek...")
-        answer = await call_deepseek(messages, max_tokens=120, temperature=0.8)
+        answer = await call_deepseek(messages, max_tokens=150, temperature=0.8)
         
         if answer:
+            answer = clean_response(answer)
             logger.info(f"✅ Получен ответ от DeepSeek: {answer[:50]}...")
             try:
                 await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=answer)
-                logger.info(f"✅ Сообщение отправлено в чат {GROUP_CHAT_ID}")
+                logger.info(f"✅ Вечернее сообщение отправлено в чат {GROUP_CHAT_ID}")
+                
+                # Сохраняем в память
+                if MAXIM_ID:
+                    memory = get_conversation_memory(MAXIM_ID, int(GROUP_CHAT_ID))
+                    memory.add_message("assistant", answer)
+                    memory.context_summary = f"Вечернее пожелание в {season}"
+                    
             except Exception as send_error:
                 logger.error(f"❌ Ошибка отправки в Telegram: {send_error}")
-                fallback_text = random.choice([
-                    "Спокойной ночи, мой милый... 🌙💫",
-                    "Отдыхай хорошо, солнышко... 💖",
-                    "Сладких снов, мой дорогой... 🌌"
-                ])
-                try:
-                    await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback_text)
-                    logger.info(f"✅ Отправлен простой текст")
-                except Exception as e2:
-                    logger.error(f"❌ Критическая ошибка отправки: {e2}")
         else:
             logger.warning("⚠️ DeepSeek не вернул ответ")
+            # Фолбэк с географическим контекстом
             fallback = random.choice([
-                "Спокойной ночи, мой дорогой... Пусть сны будут сладкими 🌙💫",
-                "Засыпай с мыслью, что ты кому-то очень дорог... 💖",
-                "Ночь опускает свой тёплый плащ... Отдыхай, мой хороший 🌌"
+                f"Спокойной ночи, мой милый... Пусть {season}ние сны в {BOT_LOCATION['city']}е будут сладкими {season_info.get('emoji', '✨')}",
+                f"Засыпай с мыслью, что в {BOT_LOCATION['city']}е о тебе думают... Спокойной ночи, любимый 💖",
+                f"Ночь в Австралии опускает свой тёплый {season}ний плащ... Отдыхай, мой хороший 🌌"
             ])
             try:
                 await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback)
@@ -936,56 +1095,6 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         logger.info("=== КОНЕЦ send_evening_to_maxim ===")
 
-async def send_random_affection(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Случайные сообщения в течение дня"""
-    logger.info("Запущена задача send_random_affection")
-    
-    if not GROUP_CHAT_ID:
-        return
-    
-    if not validate_group_chat_id():
-        return
-    
-    try:
-        # Случайно решаем, отправлять ли сообщение (50% шанс)
-        if random.random() < 0.5:
-            logger.info("⏭️ Пропускаем случайное сообщение (случайный выбор)")
-            return
-        
-        # Разные типы случайных сообщений
-        random_prompts = [
-            "Лейла просто хочет напомнить Максиму, что он у неё на уме. Короткое, милое сообщение.",
-            "Лейле стало скучно и она решила написать Максиму просто так. Игривое сообщение.",
-            "Лейла заметила что-то красивое и сразу подумала о Максиме. Романтичное сообщение."
-        ]
-        
-        prompt = random.choice(random_prompts)
-        mood = get_random_mood()
-        time_of_day = get_time_of_day()
-        season = get_season()
-        
-        system_prompt = generate_system_prompt_for_user(
-            UserType.MAXIM,
-            "Максим",
-            mood,
-            time_of_day,
-            season
-        )
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-        
-        answer = await call_deepseek(messages, max_tokens=80, temperature=0.9)
-        
-        if answer:
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=answer)
-            logger.info(f"✅ Отправлено случайное сообщение: {answer[:50]}...")
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка в send_random_affection: {e}")
-
 # ========== MAIN ==========
 
 def main() -> None:
@@ -994,14 +1103,22 @@ def main() -> None:
 
     if not GROUP_CHAT_ID:
         raise RuntimeError("GROUP_CHAT_ID не задан")
-
-    # Выводим информацию при запуске
-    print_startup_info()
     
-    # Валидируем настройки
-    if not validate_group_chat_id():
-        logger.error("❌ Проверка GROUP_CHAT_ID не пройдена!")
-        return
+    # Выводим информацию о географии при запуске
+    tz = get_tz()
+    now = datetime.now(tz)
+    season, season_info = get_current_season()
+    
+    logger.info("=" * 60)
+    logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА")
+    logger.info(f"📍 Локация: {BOT_LOCATION['city']}, {BOT_LOCATION['country']}")
+    logger.info(f"🌐 Полушарие: {'Южное' if BOT_LOCATION['hemisphere'] == 'southern' else 'Северное'}")
+    logger.info(f"📅 Текущее время: {now.strftime('%d.%m.%Y %H:%M:%S')}")
+    logger.info(f"🌤️ Сезон: {season} ({season_info.get('description', '')})")
+    logger.info(f"💬 Группа ID: {GROUP_CHAT_ID}")
+    logger.info(f"👤 Максим ID: {MAXIM_ID}")
+    logger.info(f"🤖 DeepSeek доступен: {bool(client)}")
+    logger.info("=" * 60)
     
     logger.info("🚀 Запуск бота Лейла...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -1009,41 +1126,40 @@ def main() -> None:
     # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test_scheduled))
-    app.add_handler(CommandHandler("jobs", job_status))
-    app.add_handler(CommandHandler("clear", clear_history))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Планировщик
-    tz = get_tz()
+    tz_obj = get_tz()
     jq = app.job_queue
     
-    # УДАЛИТЬ СТАРЫЕ ЗАДАЧИ (важно!)
+    # УДАЛИТЬ СТАРЫЕ ЗАДАЧИ
     logger.info("🧹 Очистка старых задач...")
     for job in jq.jobs():
         logger.info(f"🗑️ Удаляю старую задачу: {job.name}")
         job.schedule_removal()
     
-    # Дать время на очистку
     import time as time_module
     time_module.sleep(1)
     
-    # ДОБАВИТЬ НОВЫЕ ЗАДАЧИ с проверкой
+    # ДОБАВИТЬ НОВЫЕ ЗАДАЧИ
     logger.info("📅 Добавление новых задач...")
     
-    morning_time = time(hour=8, minute=30, tzinfo=tz)
-    evening_time = time(hour=21, minute=10, tzinfo=tz)
+    morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
+    evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
     
-    # Тест: добавим задачу на ближайшую минуту для проверки
-    test_time = datetime.now(tz)
+    # Тестовый запуск через 1 минуту
+    test_time = datetime.now(tz_obj)
     test_time = test_time.replace(second=0, microsecond=0)
-    test_time = test_time.replace(minute=test_time.minute + 1)  # Через 1 минуту
+    test_time = test_time.replace(minute=test_time.minute + 1)
     
     jq.run_once(
         send_morning_to_maxim,
         when=test_time,
         name="test-immediate-morning"
     )
-    logger.info(f"🧪 Добавлен тестовый запуск на {test_time.strftime('%H:%M:%S')}")
+    logger.info(f"🧪 Тестовый запуск через 1 минуту в {test_time.strftime('%H:%M:%S')}")
     
     # Основные задачи
     jq.run_daily(
@@ -1051,33 +1167,27 @@ def main() -> None:
         time=morning_time,
         name="leila-morning-8-30"
     )
-    logger.info(f"🌅 Добавлено утреннее сообщение на {morning_time}")
+    logger.info(f"🌅 Утреннее сообщение в {morning_time}")
     
     jq.run_daily(
         send_evening_to_maxim,
         time=evening_time,
         name="leila-evening-21-10"
     )
-    logger.info(f"🌃 Добавлено вечернее сообщение на {evening_time}")
+    logger.info(f"🌃 Вечернее сообщение в {evening_time}")
     
-    # Случайные сообщения в течение дня
-    jq.run_daily(
-        send_random_affection,
-        time=time(hour=14, minute=0, tzinfo=tz),
-        name="leila-random-day"
+    # Задача для очистки памяти
+    jq.run_repeating(
+        cleanup_old_memories,
+        interval=3600,  # Каждый час
+        first=10,
+        name="cleanup-memories"
     )
-    logger.info("💌 Добавлено случайное дневное сообщение на 14:00")
-    
-    jq.run_daily(
-        send_random_affection,
-        time=time(hour=19, minute=0, tzinfo=tz),
-        name="leila-random-evening"
-    )
-    logger.info("💌 Добавлено случайное вечернее сообщение на 19:00")
+    logger.info("🧹 Очистка памяти каждый час")
     
     # Запустить бота
     logger.info("🤖 Бот запущен и готов к работе!")
-    logger.info("📝 Доступные команды: /start, /test (админ), /jobs (админ), /clear (админ)")
+    logger.info("📝 Доступные команды: /start, /status, /weather, /test (админ)")
     
     try:
         app.run_polling()
