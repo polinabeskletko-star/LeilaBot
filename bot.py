@@ -613,27 +613,27 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     if is_reasoning:
         model = DEEPSEEK_MODELS["r1"]
         temperature = 0.3
-        max_tokens = 300
+        max_tokens = 500
         reason = "reasoning_query"
     elif is_technical:
         model = DEEPSEEK_MODELS["coder"]
         temperature = 0.5
-        max_tokens = 350
+        max_tokens = 600
         reason = "technical_query"
     elif is_complex:
         model = DEEPSEEK_MODELS["v3"]
         temperature = 0.7
-        max_tokens = 250
+        max_tokens = 400
         reason = "complex_query"
     elif is_maxim:
         model = DEEPSEEK_MODELS["lite"]
         temperature = 0.85
-        max_tokens = 300
+        max_tokens = 350
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 300
+        max_tokens = 350
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
@@ -1343,16 +1343,16 @@ def main() -> None:
     logger.info("📅 Настройка планировщика...")
     
     # Test run in 2 minutes
-    test_time = datetime.now(tz_obj)
-    test_time = test_time.replace(second=0, microsecond=0)
-    test_time = test_time.replace(minute=test_time.minute + 2)
+    # test_time = datetime.now(tz_obj)
+    # test_time = test_time.replace(second=0, microsecond=0)
+    # test_time = test_time.replace(minute=test_time.minute + 2)
     
-    jq.run_once(
-        send_morning_to_maxim,
-        when=test_time,
-        name="test-morning"
-    )
-    logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
+    # jq.run_once(
+    #    send_morning_to_maxim,
+    #    when=test_time,
+    #    name="test-morning"
+    # )
+    # logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
     
     # Morning message to Maxim at 8:30 AM
     morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
