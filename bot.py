@@ -1186,7 +1186,7 @@ async def send_friday_tennis_reminder(context: ContextTypes.DEFAULT_TYPE) -> Non
         # Simple message with the code
         message = f"""🎾 *Пятничный теннис!*
 
-Время: 16:00
+Время: 16:30
 Код доступа: `{TENNIS_ACCESS_CODE}`
 Действует до: {TENNIS_CODE_VALID_UNTIL}
 
