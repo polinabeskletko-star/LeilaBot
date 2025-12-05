@@ -44,7 +44,6 @@ DEFAULT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 # Модели DeepSeek
 DEEPSEEK_MODELS = {
     "chat": "deepseek-chat",
-    "lite": "deepseek-v3-lite",
     "v3": "deepseek-v3",
     "r1": "deepseek-r1",
     "coder": "deepseek-coder-v2",
@@ -610,6 +609,7 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     is_reasoning = any(re.search(pattern, text_lower) for pattern in reasoning_patterns)
     is_technical = any(re.search(pattern, text_lower) for pattern in technical_patterns)
     
+    # ИСПРАВЛЕННЫЕ МОДЕЛИ:
     if is_reasoning:
         model = DEEPSEEK_MODELS["r1"]
         temperature = 0.3
@@ -626,14 +626,14 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
         max_tokens = 400
         reason = "complex_query"
     elif is_maxim:
-        model = DEEPSEEK_MODELS["lite"]
+        model = DEEPSEEK_MODELS["chat"]  # Было "lite", теперь "chat"
         temperature = 0.85
         max_tokens = 350
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 350
+        max_tokens = 350  # Увеличено для полных ответов
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
@@ -1104,7 +1104,7 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         
         model_config = {
-            "model": DEEPSEEK_MODELS["lite"],
+            "model": DEEPSEEK_MODELS["chat"],
             "temperature": 0.9,
             "max_tokens": 250,
             "require_reasoning": False
@@ -1158,7 +1158,7 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
         
         model_config = {
-            "model": DEEPSEEK_MODELS["lite"],
+            "model": DEEPSEEK_MODELS["chat"],
             "temperature": 0.85,
             "max_tokens": 200,
             "require_reasoning": False
