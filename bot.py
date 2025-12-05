@@ -628,12 +628,12 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     elif is_maxim:
         model = DEEPSEEK_MODELS["lite"]
         temperature = 0.85
-        max_tokens = 200
+        max_tokens = 300
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 180
+        max_tokens = 300
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
