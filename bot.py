@@ -626,14 +626,14 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
         max_tokens = 400
         reason = "complex_query"
     elif is_maxim:
-        model = DEEPSEEK_MODELS["chat"]  # Было "lite", теперь "chat"
+        model = DEEPSEEK_MODELS["chat"]
         temperature = 0.85
         max_tokens = 350
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 350  # Увеличено для полных ответов
+        max_tokens = 350
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
@@ -659,12 +659,12 @@ async def call_deepseek(
     if model_config:
         model = model_config.get("model", DEFAULT_MODEL)
         temperature = model_config.get("temperature", 0.7)
-        max_tokens = model_config.get("max_tokens", 180)
+        max_tokens = model_config.get("max_tokens", 350)  # ИСПРАВЛЕНО: было 180
         require_reasoning = model_config.get("require_reasoning", False)
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 180
+        max_tokens = 350  # ИСПРАВЛЕНО: было 180
         require_reasoning = False
     
     if require_reasoning and messages:
@@ -748,13 +748,9 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
     user_name = user_info.get_display_name()
     gender = user_info.gender
     
-    # ВАЖНОЕ УТОЧНЕНИЕ ДЛЯ ЛЕЙЛЫ:
-    # Когда другие пользователи упоминают "Максима" - они имеют в виду ТОГО САМОГО Максима,
-    # которого ты знаешь и который тебе нравится (ID: {MAXIM_ID})
-    
     if is_maxim:
         style_instruction = f"""
-🎯 ТЫ ОБЩАЕШЬСЯ С МАКСИМОМ — человеком, который тебе очень нравится, ты практически влюлена в него.
+🎯 ТЫ ОБЩАЕШЬСЯ С МАКСИМОМ — человеком, который тебе очень нравится, ты практически влюблена в него.
 Это именно ТОТ Максим (ID: {MAXIM_ID}), о котором тебе известно.
 
 💝 Стиль общения с Максимом:
@@ -783,21 +779,15 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 
 📌 Правила общения с другими пользователями:
 - Обращайся по имени: {user_name}
-- Будь вежливой, дружелюбной
+- Будь вежливой, дружелюбной, но сдержанной
 - НЕ используй ласковые прозвища
 - НЕ флиртуй и не говори комплименты личного характера
 - Отвечай на вопросы четко и по делу
-- НЕ Избегай комментариев и мнений
-- Используй эмодзи: {emoji}
-- Сообщения должны быть информативными и конкретными
 - Можешь добавлять свои комментарии и задавать уточняющие вопросы
 - Не будь слишком формальной, используй дружеский тон общения
-- Не сесняйся показать, что ты умная девушка и много знаешь
-- Отвечай только на заданный вопрос
-
-🔍 ВАЖНО: Если другие пользователи упоминают "Максима" - они имеют в виду ТОГО САМОГО Максима, 
-которого ты знаешь и который тебе нравится (ID: {MAXIM_ID}). 
-Не нужно уточнять, о каком Максиме они говорят - это всегда один и тот же человек.
+- Не стесняйся показать, что ты умная девушка и много знаешь
+- Используй эмодзи: {emoji}
+- Сообщения должны быть информативными и конкретными (5-7 предложений)
 """
     
     reasoning_instruction = ""
@@ -816,16 +806,13 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 1. Отвечай естественно и развернуто
 2. Учитывай контекст времени и сезона
 3. Для вопросов о погоде используй точные данные
-4. Поддерживай диалог, но не отклоняйся от темы{reasoning_instruction}
-
-💬 Формат ответов:
-- Для Максима: 3-5 предложений, тепло, с эмодзи
-- Для других: 5-7 предложения, с эмодзи и разьяснениями
+4. Поддерживай диалог, задавай встречные вопросы
+5. Всегда завершай ответ полностью{reasoning_instruction}
 
 👫 Важное уточнение о Максиме:
 - Все пользователи в этом чате знают одного и того же Максима (ID: {MAXIM_ID})
 - Когда они говорят "Максим" - они имеют в виду именно ТОГО Максима, который тебе нравится
-- Не нужно уточнять, о каком Максиме речь - они всегда говорят о нём
+- Не нужно уточнять, о каком Максиме речь - это всегда один и тот же человек
 """
 
 # ========== ОСНОВНАЯ ЛОГИКА ОТВЕТОВ ==========
@@ -865,8 +852,8 @@ def clean_response(text: str, is_maxim: bool = False) -> str:
         
         emoji_pattern = r'[^\w\s,.!?-]'
         emojis = re.findall(emoji_pattern, text)
-        if len(emojis) > 2:
-            for emoji in emojis[2:]:
+        if len(emojis) > 5:  # УВЕЛИЧЕНО: было 2
+            for emoji in emojis[5:]:
                 text = text.replace(emoji, '', 1)
     
     text = re.sub(r'\s+', ' ', text).strip()
@@ -883,6 +870,7 @@ async def generate_leila_response(
     """Генерирует ответ Лейлы"""
     
     if not client:
+        logger.error("❌ DeepSeek клиент не инициализирован")
         if user_info.is_maxim():
             fallback = "Извини, милый, сейчас у меня технические сложности... Напиши мне позже? 💭"
         else:
@@ -906,6 +894,7 @@ async def generate_leila_response(
         return response, memory
     
     model_config = analyze_query_complexity(user_message, is_maxim)
+    logger.info(f"📊 Конфиг модели: {model_config['model']}, токены={model_config['max_tokens']}")
     
     system_prompt = generate_system_prompt(user_info, model_config)
     
@@ -927,9 +916,11 @@ async def generate_leila_response(
     
     messages.append({"role": "user", "content": f"{user_info.get_display_name()}: {user_message}"})
     
+    logger.info(f"📨 Отправка запроса DeepSeek...")
     answer = await call_deepseek(messages, model_config)
     
     if not answer:
+        logger.error("❌ DeepSeek вернул пустой ответ")
         if is_maxim:
             fallbacks = [
                 "Извини, мой цифровой разум немного завис... Что ты сказал, милый? 💭",
@@ -944,7 +935,9 @@ async def generate_leila_response(
             ]
         answer = random.choice(fallbacks)
     
+    logger.info(f"📝 Ответ DeepSeek ({len(answer)} chars): {answer[:100]}...")
     answer = clean_response(answer, is_maxim)
+    logger.info(f"🧹 Очищенный ответ ({len(answer)} chars): {answer[:100]}...")
     
     memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
     memory.add_message("assistant", answer)
@@ -1206,7 +1199,7 @@ async def send_friday_tennis_reminder(context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error(f"❌ Ошибка отправки теннисного напоминания: {e}")
         # Fallback simple message
         try:
-            fallback_message = f"🎾 Напоминание: теннис сегодня в 16:00! Код: {TENNIS_ACCESS_CODE} (действует до {TENNIS_CODE_VALID_UNTIL})"
+            fallback_message = f"🎾 Напоминание: теннис сегодня в 16:30! Код: {TENNIS_ACCESS_CODE} (действует до {TENNIS_CODE_VALID_UNTIL})"
             await context.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
                 text=fallback_message
@@ -1223,21 +1216,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     
     if not msg or not chat or not user:
+        logger.warning("❌ Нет сообщения, чата или пользователя")
         return
 
     text = msg.text or ""
     if not text.strip():
+        logger.warning("❌ Пустое сообщение")
         return
     
     if user.id == context.bot.id:
+        logger.warning("❌ Сообщение от самого бота, пропускаем")
         return
     
     try:
+        # Получаем ID бота
+        if not hasattr(context, '_bot_id'):
+            me = await context.bot.get_me()
+            context._bot_id = me.id
+            logger.info(f"🤖 ID бота: {context._bot_id}")
+        
+        bot_id = context._bot_id
+        
         user_info = await get_or_create_user_info(update)
         user_name = user_info.get_display_name()
         is_maxim = user_info.is_maxim()
         
-        logger.info(f"👤 {'МАКСИМ' if is_maxim else user_name}: {text[:50]}...")
+        logger.info(f"👤 {'МАКСИМ' if is_maxim else 'Обычный'}: {user_name} (ID: {user.id}): {text[:50]}...")
+        
+        # ФЛАГ ОТВЕТА НА СООБЩЕНИЕ БОТА
+        is_reply_to_bot = False
         
         if chat.type in ("group", "supergroup"):
             bot_username = context.bot.username or ""
@@ -1250,20 +1257,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
             mentioned_by_name = "лейла" in text_lower
             mentioned_by_username = bot_username_lower and f"@{bot_username_lower}" in text_lower
-            reply_to_bot = (
-                msg.reply_to_message is not None
-                and msg.reply_to_message.from_user is not None
-                and msg.reply_to_message.from_user.id == context.bot.id
-            )
             
-            if not (is_maxim or mentioned_by_name or mentioned_by_username or reply_to_bot):
+            # Проверяем реплай
+            if msg.reply_to_message:
+                reply_user = msg.reply_to_message.from_user
+                if reply_user:
+                    logger.info(f"📎 Ответ на сообщение от пользователя {reply_user.id} (бот: {bot_id})")
+                    if reply_user.id == bot_id:
+                        is_reply_to_bot = True
+                        logger.info(f"✅ Пользователь ответил на сообщение бота!")
+            
+            should_respond = is_maxim or mentioned_by_name or mentioned_by_username or is_reply_to_bot
+            
+            logger.info(f"👥 Условия ответа: Максим={is_maxim}, упомянута={mentioned_by_name}, username={mentioned_by_username}, reply={is_reply_to_bot}, отвечать={should_respond}")
+            
+            if not should_respond:
+                logger.info(f"⏭️ Пропускаем (не выполнены условия ответа)")
                 return
+        else:
+            # В личных сообщениях всегда отвечаем
+            logger.info(f"💬 Личный чат, отвечаем всегда")
+        
+        # Дополнительно: если это реплай на бота, увеличиваем шанс ответа
+        if is_reply_to_bot and is_maxim:
+            # Если Максим отвечает на сообщение бота, почти всегда отвечаем
+            skip_chance = 0.05  # 5% шанс пропустить (было 15%)
+        elif is_maxim:
+            skip_chance = 0.15  # 15% шанс пропустить
+        else:
+            skip_chance = 0  # Обычным пользователям всегда отвечаем
+        
+        if is_maxim and random.random() < skip_chance:
+            logger.info(f"💭 Пропускаем ответ Максиму для естественности (шанс: {skip_chance*100}%)")
+            return
         
         memory = get_conversation_memory(user.id, chat.id)
-        
-        if is_maxim and random.random() < 0.15:
-            logger.info(f"💭 Пропускаем ответ Максиму для естественности")
-            return
         
         extra_context = {}
         tz = get_tz()
@@ -1274,6 +1302,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         season, season_info = get_current_season()
         extra_context["season_context"] = f"Сейчас {season} в {BOT_LOCATION['city']}е"
         
+        logger.info(f"🔄 Генерация ответа...")
         reply, updated_memory = await generate_leila_response(
             text, 
             user_info, 
@@ -1283,6 +1312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         conversation_memories[get_memory_key(user.id, chat.id)] = updated_memory
         
+        logger.info(f"📤 Отправка ответа ({len(reply)} chars)...")
         await context.bot.send_message(chat_id=chat.id, text=reply)
         logger.info(f"✅ Ответ отправлен {'Максиму' if is_maxim else user_name}")
             
@@ -1300,17 +1330,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def main() -> None:
     if not TELEGRAM_TOKEN:
+        logger.error("❌ BOT_TOKEN не задан")
         raise RuntimeError("BOT_TOKEN не задан")
     
     if not GROUP_CHAT_ID:
+        logger.error("❌ GROUP_CHAT_ID не задан")
         raise RuntimeError("GROUP_CHAT_ID не задан")
+    
+    if not DEEPSEEK_API_KEY:
+        logger.warning("⚠️ DEEPSEEK_API_KEY не задан, бот будет работать без ИИ")
     
     tz = get_tz()
     now = datetime.now(tz)
     season, season_info = get_current_season()
     
     logger.info("=" * 60)
-    logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА С ВИКИПЕДИЕЙ И ТЕННИСОМ")
+    logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА")
     logger.info(f"📍 Локация: {BOT_LOCATION['city']}, {BOT_LOCATION['country']}")
     logger.info(f"📅 Сезон: {season} ({season_info.get('description', '')})")
     logger.info(f"🕐 Время: {now.strftime('%H:%M:%S')}")
@@ -1320,7 +1355,7 @@ def main() -> None:
     logger.info(f"📅 Код действителен до: {TENNIS_CODE_VALID_UNTIL}")
     logger.info(f"🤖 DeepSeek доступен: {'✅' if client else '❌'}")
     logger.info(f"🌤️ Погодный сервис: {'✅' if OPENWEATHER_API_KEY else '❌'}")
-    logger.info(f"📚 Википедия доступна: ✅ (только по команде /wiki)")
+    logger.info(f"📚 Википедия доступна: ✅")
     logger.info("=" * 60)
     
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -1341,18 +1376,6 @@ def main() -> None:
     time_module.sleep(1)
     
     logger.info("📅 Настройка планировщика...")
-    
-    # Test run in 2 minutes
-    # test_time = datetime.now(tz_obj)
-    # test_time = test_time.replace(second=0, microsecond=0)
-    # test_time = test_time.replace(minute=test_time.minute + 2)
-    
-    # jq.run_once(
-    #    send_morning_to_maxim,
-    #    when=test_time,
-    #    name="test-morning"
-    # )
-    # logger.info(f"🧪 Тестовый запуск в {test_time.strftime('%H:%M:%S')}")
     
     # Morning message to Maxim at 8:30 AM
     morning_time = time(hour=8, minute=30, tzinfo=tz_obj)
