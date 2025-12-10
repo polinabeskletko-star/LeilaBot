@@ -613,12 +613,12 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     if is_reasoning:
         model = DEEPSEEK_MODELS["r1"]
         temperature = 0.3
-        max_tokens = 300
+        max_tokens = 250
         reason = "reasoning_query"
     elif is_technical:
         model = DEEPSEEK_MODELS["coder"]
         temperature = 0.5
-        max_tokens = 300
+        max_tokens = 250
         reason = "technical_query"
     elif is_complex:
         model = DEEPSEEK_MODELS["v3"]
@@ -628,12 +628,12 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     elif is_maxim:
         model = DEEPSEEK_MODELS["chat"]
         temperature = 0.85
-        max_tokens = 250
+        max_tokens = 200
         reason = "maxim_user"
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 250
+        max_tokens = 200
         reason = "default_user"
     
     require_reasoning = is_reasoning or is_complex
@@ -659,12 +659,12 @@ async def call_deepseek(
     if model_config:
         model = model_config.get("model", DEFAULT_MODEL)
         temperature = model_config.get("temperature", 0.7)
-        max_tokens = model_config.get("max_tokens", 350)  # ИСПРАВЛЕНО: было 180
+        max_tokens = model_config.get("max_tokens", 250)  # ИСПРАВЛЕНО: было 180
         require_reasoning = model_config.get("require_reasoning", False)
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 350  # ИСПРАВЛЕНО: было 180
+        max_tokens = 250  # ИСПРАВЛЕНО: было 180
         require_reasoning = False
     
     if require_reasoning and messages:
