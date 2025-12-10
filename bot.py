@@ -159,39 +159,171 @@ class ConversationMemory:
     messages: List[Dict[str, str]]
     last_activity: datetime
     context_summary: str = ""
+    summary_history: List[str] = None  # Добавим историю суммаризаций
+    important_points: List[str] = None  # Добавим важные моменты
+    
+    def __post_init__(self):
+        if self.summary_history is None:
+            self.summary_history = []
+        if self.important_points is None:
+            self.important_points = []
     
     def add_message(self, role: str, content: str):
         """Добавляет сообщение в историю"""
         self.messages.append({"role": role, "content": content})
         self.last_activity = datetime.now(pytz.UTC)
-        if len(self.messages) > 30:
-            self.messages = self.messages[-30:]
+        # УВЕЛИЧИМ с 30 до 50 сообщений
+        if len(self.messages) > 50:
+            # Сохраняем важные сообщения
+            important_msgs = [msg for msg in self.messages[-20:] if self._is_important_message(msg)]
+            removed_msgs = self.messages[:30]
+            # Создаем сумму удаленных сообщений
+            if len(removed_msgs) > 10:
+                summary = self._create_summary_of_messages(removed_msgs)
+                self.summary_history.append(summary)
+                if len(self.summary_history) > 5:
+                    self.summary_history = self.summary_history[-5:]
+            
+            self.messages = important_msgs + self.messages[30:]
     
-    def get_recent_messages(self, count: int = 10) -> List[Dict[str, str]]:
+    def _is_important_message(self, msg: Dict[str, str]) -> bool:
+        """Определяет, важно ли сообщение для сохранения в памяти"""
+        content = msg["content"].lower()
+        important_keywords = [
+            "имя", "зовут", "звать", "помни", "запомни", "важно",
+            "никогда", "всегда", "люби", "нравится", "не нравится",
+            "работа", "профессия", "семья", "друзья", "хобби",
+            "аллергия", "боюсь", "страх", "мечта", "цель"
+        ]
+        
+        # Сообщения от пользователя важнее
+        if msg["role"] == "user":
+            return any(keyword in content for keyword in important_keywords)
+        
+        # Сообщения от ассистента, где есть факты
+        if msg["role"] == "assistant":
+            fact_patterns = [
+                r"тебе \d+", r"ты сказал.*что", r"ты упоминал",
+                r"помню.*что", r"знаю.*что"
+            ]
+            return any(re.search(pattern, content) for pattern in fact_patterns)
+        
+        return False
+    
+    def _create_summary_of_messages(self, messages: List[Dict[str, str]]) -> str:
+        """Создает краткое резюме сообщений"""
+        user_messages = [msg["content"] for msg in messages if msg["role"] == "user"]
+        assistant_messages = [msg["content"] for msg in messages if msg["role"] == "assistant"]
+        
+        topics = set()
+        for msg in user_messages[:10]:  # Берем только первые 10 для суммаризации
+            msg_lower = msg.lower()
+            if any(word in msg_lower for word in ["погод", "температур"]):
+                topics.add("погода")
+            if any(word in msg_lower for word in ["работа", "проект", "задач"]):
+                topics.add("работа")
+            if any(word in msg_lower for word in ["еда", "кухн", "рецепт"]):
+                topics.add("еда")
+            if any(word in msg_lower for word in ["фильм", "книг", "музык"]):
+                topics.add("развлечения")
+            if any(word in msg_lower for word in ["планы", "выходные", "отпуск"]):
+                topics.add("планы")
+        
+        if topics:
+            return f"Обсуждали: {', '.join(list(topics)[:3])}"
+        return "Разговор на общие темы"
+    
+    def get_recent_messages(self, count: int = 15) -> List[Dict[str, str]]:  # УВЕЛИЧИМ с 10 до 15
         """Получает последние сообщения"""
         return self.messages[-count:] if self.messages else []
+    
+    def get_extended_context(self) -> str:
+        """Получает расширенный контекст с историей"""
+        if not self.summary_history:
+            return self.get_context_summary()
+        
+        extended = []
+        if self.summary_history:
+            extended.append(f"Предыдущие темы: {'; '.join(self.summary_history[-3:])}")
+        
+        context_summary = self.get_context_summary()
+        if context_summary:
+            extended.append(context_summary)
+        
+        if self.important_points:
+            extended.append(f"Важные детали: {'; '.join(self.important_points[-5:])}")
+        
+        return "\n".join(extended) if extended else ""
     
     def get_context_summary(self) -> str:
         """Создает краткое резюме контекста"""
         if self.context_summary:
             return self.context_summary
             
-        recent = self.get_recent_messages(5)
+        recent = self.get_recent_messages(8)  # Увеличим с 5 до 8
+        
         topics = set()
+        user_details = []
         
         for msg in recent:
             content = msg["content"].lower()
-            if any(word in content for word in ["работа", "проект", "задача"]):
-                topics.add("работа")
-            if any(word in content for word in ["погод", "температур", "дождь", "солнц"]):
+            role = msg["role"]
+            
+            # Определяем темы
+            if any(word in content for word in ["работа", "проект", "задача", "офис", "коллег"]):
+                topics.add("работа/проекты")
+            if any(word in content for word in ["погод", "температур", "дождь", "солнц", "холод", "жарк"]):
                 topics.add("погода")
-            if any(word in content for word in ["еда", "ужин", "обед", "кофе"]):
-                topics.add("еда")
-            if any(word in content for word in ["планы", "выходные", "отпуск"]):
-                topics.add("планы")
+            if any(word in content for word in ["еда", "ужин", "обед", "кофе", "чай", "рецепт", "готов"]):
+                topics.add("еда/кулинария")
+            if any(word in content for word in ["планы", "выходные", "отпуск", "путешеств", "поездк"]):
+                topics.add("планы/путешествия")
+            if any(word in content for word in ["фильм", "сериал", "книг", "музык", "игр", "хобби"]):
+                topics.add("развлечения/хобби")
+            if any(word in content for word in ["семья", "друз", "подруг", "знаком", "отношен"]):
+                topics.add("отношения")
+            if any(word in content for word in ["здоровье", "болезн", "врач", "самочувств"]):
+                topics.add("здоровье")
+            
+            # Выявляем важные детали о пользователе
+            if role == "user":
+                # Имя/обращение
+                name_patterns = [
+                    r"меня зовут (\w+)",
+                    r"зовут (\w+)",
+                    r"я (\w+)",
+                    r"мое имя (\w+)"
+                ]
+                for pattern in name_patterns:
+                    match = re.search(pattern, content)
+                    if match and len(match.group(1)) > 2:
+                        user_details.append(f"пользователя зовут {match.group(1)}")
+                        break
+                
+                # Предпочтения
+                if "люблю" in content or "нравится" in content:
+                    pref_match = re.search(r"(люблю|нравится) (.+?)(?:\.|,|$)", content)
+                    if pref_match:
+                        user_details.append(f"нравится: {pref_match.group(2)}")
+                
+                # Не нравится
+                if "не люблю" in content or "не нравится" in content or "ненавижу" in content:
+                    dislike_match = re.search(r"(не люблю|не нравится|ненавижу) (.+?)(?:\.|,|$)", content)
+                    if dislike_match:
+                        user_details.append(f"не нравится: {dislike_match.group(2)}")
+        
+        # Сохраняем важные детали
+        for detail in user_details:
+            if detail not in self.important_points:
+                self.important_points.append(detail)
+                if len(self.important_points) > 10:
+                    self.important_points = self.important_points[-10:]
         
         if topics:
-            self.context_summary = f"Обсуждали: {', '.join(topics)}"
+            topics_list = list(topics)
+            self.context_summary = f"Обсуждали: {', '.join(topics_list[:5])}"
+            if user_details:
+                self.context_summary += f"\nДетали: {'; '.join(user_details[:3])}"
         
         return self.context_summary or ""
 
@@ -719,7 +851,7 @@ async def call_deepseek(
         require_reasoning = False
     
     if require_reasoning and messages:
-        reasoning_prompt = "Подумай шаг за шагом перед ответом."
+        reasoning_prompt = "Подумай шаг за шаг перед ответом."
         messages_with_reasoning = [messages[0]] + [{"role": "system", "content": reasoning_prompt}] + messages[1:]
     else:
         messages_with_reasoning = messages
@@ -816,13 +948,13 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
     else:
         if gender == "female":
             pronoun = "девушкой"
-            emoji = "🌸👋"
+            greeting = f"Привет, {user_name}"
         elif gender == "male":
             pronoun = "мужчиной"
-            emoji = "👍👋"
+            greeting = f"Здравствуй, {user_name}"
         else:
             pronoun = "пользователем"
-            emoji = "👋"
+            greeting = f"Здравствуйте, {user_name}"
         
         style_instruction = f"""
 👤 ТЫ ОБЩАЕШЬСЯ С {pronoun} {user_name}
@@ -856,9 +988,9 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
     
     reasoning_instruction = ""
     if model_config.get("require_reasoning"):
-        reasoning_instruction = "\n🤔 Для этого запроса подумай вслух и объясни свои рассуждения."
+        reasoning_instruction = "\n🤔 Для этого запступа подумай вслух и объясни свои рассуждения."
     
-    return f"""Ты — Лейла, общительная и внимательная девушка из {BOT_LOCATION['city']}а, Австралия.
+    return f"""Ты — Лейла, {('нежная и влюбленная' if is_maxim else 'умная и саркастичная')} девушка из {BOT_LOCATION['city']}а, Австралия.
 
 {australian_context}
 
@@ -868,7 +1000,7 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 
 🧠 Общие инструкции:
 1. Отвечай естественно и развернуто
-2. Вопросы связаннне со временем, местоположением используй точные данные
+2. Вопросы связанные со временем, местоположением используй точные данные
 3. Для вопросов о погоде используй точные данные
 4. Поддерживай диалог, задавай встречные вопросы, только если это необходимо
 5. Завершай ответ полностью{reasoning_instruction} если этого требует контекст или ситуация
@@ -992,7 +1124,14 @@ async def generate_leila_response(
     
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     
-    recent_messages = memory.get_recent_messages(6)
+    # ИСПРАВЛЕНИЕ: Увеличиваем количество сообщений из памяти
+    recent_messages = memory.get_recent_messages(10)  # Было 6, стало 10
+    
+    # Добавляем расширенный контекст перед историей сообщений
+    extended_context = memory.get_extended_context()
+    if extended_context:
+        messages.append({"role": "system", "content": f"Контекст предыдущих разговоров:\n{extended_context}"})
+    
     if recent_messages:
         messages.extend(recent_messages)
     
@@ -1004,7 +1143,7 @@ async def generate_leila_response(
             context_text += f"{context['season_context']}\n"
         
         if context_text:
-            messages.append({"role": "user", "content": f"Контекст:\n{context_text}"})
+            messages.append({"role": "user", "content": f"Текущий контекст:\n{context_text}"})
     
     messages.append({"role": "user", "content": f"{user_info.get_display_name()}: {user_message}"})
     
@@ -1031,11 +1170,27 @@ async def generate_leila_response(
     answer = clean_response(answer, is_maxim)
     logger.info(f"🧹 Очищенный ответ ({len(answer)} chars): {answer[:100]}...")
     
+    # ОБНОВЛЕНИЕ: Обновляем контекст после ответа
     memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
     memory.add_message("assistant", answer)
     
+    # Если сообщение содержит важную информацию - добавляем в память
     if len(user_message) > 10:
         user_info.add_topic(f"диалог: {user_message[:30]}...")
+        
+        # Проверяем, содержит ли сообщение важную информацию для запоминания
+        important_keywords = [
+            "помни", "запомни", "запиши", "не забудь", 
+            "люблю", "ненавижу", "аллерги", "боюсь",
+            "работаю в", "живу в", "родился", "день рождения"
+        ]
+        
+        if any(keyword in user_message.lower() for keyword in important_keywords):
+            # Извлекаем суть для запоминания
+            essence = user_message[:100] + "..." if len(user_message) > 100 else user_message
+            if essence not in memory.important_points:
+                memory.important_points.append(essence)
+                logger.info(f"💾 Сохранен важный пункт в память: {essence[:50]}...")
     
     return answer, memory
 
@@ -1054,10 +1209,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ]
         else:
             greetings = [
-        f"Здравствуйте, {user_info.get_display_name()}. Лейла на связи. Что вас интересует?",
-        f"{user_info.get_display_name()}, привет. Я Лейла. Надеюсь, у вас есть что-то интересное для обсуждения.",
-        f"А, {user_info.get_display_name()}... Ну что ж, давайте общаться. Только постарайтесь не говорить очевидности."
-    ]
+                f"Здравствуйте, {user_info.get_display_name()}. Лейла на связи. Что вас интересует?",
+                f"{user_info.get_display_name()}, привет. Я Лейла. Надеюсь, у вас есть что-то интересное для обсуждения.",
+                f"А, {user_info.get_display_name()}... Ну что ж, давайте общаться. Только постарайтесь не говорить очевидности."
+            ]
         
         await update.effective_message.reply_text(random.choice(greetings))
     except Exception as e:
@@ -1147,6 +1302,68 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.error(f"Ошибка команды /wiki: {e}")
         await update.message.reply_text("Извините, произошла ошибка при поиске в Википедии.")
+
+async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /reset_memory для сброса памяти диалога (только для админа)"""
+    try:
+        user = update.effective_user
+        if str(user.id) != ADMIN_ID:
+            await update.message.reply_text("Эта команда только для администратора.")
+            return
+        
+        user_info = await get_or_create_user_info(update)
+        chat_id = update.effective_chat.id
+        
+        memory_key = get_memory_key(user_info.id, chat_id)
+        if memory_key in conversation_memories:
+            del conversation_memories[memory_key]
+            await update.message.reply_text("✅ Память диалога сброшена.")
+        else:
+            await update.message.reply_text("Память для этого диалога не найдена.")
+            
+    except Exception as e:
+        logger.error(f"Ошибка /reset_memory: {e}")
+        await update.message.reply_text("Ошибка сброса памяти.")
+
+async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /show_memory для показа текущей памяти (только для админа)"""
+    try:
+        user = update.effective_user
+        if str(user.id) != ADMIN_ID:
+            await update.message.reply_text("Эта команда только для администратора.")
+            return
+        
+        user_info = await get_or_create_user_info(update)
+        chat_id = update.effective_chat.id
+        
+        memory_key = get_memory_key(user_info.id, chat_id)
+        if memory_key in conversation_memories:
+            memory = conversation_memories[memory_key]
+            
+            response = f"📊 Память диалога с {user_info.get_display_name()}:\n\n"
+            response += f"Сообщений в истории: {len(memory.messages)}\n"
+            response += f"Последняя активность: {memory.last_activity.strftime('%H:%M:%S')}\n\n"
+            
+            if memory.summary_history:
+                response += f"История тем:\n"
+                for i, summary in enumerate(memory.summary_history[-3:], 1):
+                    response += f"{i}. {summary}\n"
+            
+            if memory.important_points:
+                response += f"\nВажные пункты:\n"
+                for i, point in enumerate(memory.important_points[-5:], 1):
+                    response += f"{i}. {point[:50]}...\n"
+            
+            if memory.context_summary:
+                response += f"\nТекущий контекст:\n{memory.context_summary}"
+            
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("Память для этого диалога не найдена.")
+            
+    except Exception as e:
+        logger.error(f"Ошибка /show_memory: {e}")
+        await update.message.reply_text("Ошибка показа памяти.")
 
 # ========== ПЛАНОВЫЕ СООБЩЕНИЯ ==========
 
@@ -1457,6 +1674,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
+    app.add_handler(CommandHandler("reset_memory", reset_memory))
+    app.add_handler(CommandHandler("show_memory", show_memory))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     tz_obj = get_tz()
