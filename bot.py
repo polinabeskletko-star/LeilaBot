@@ -1089,26 +1089,38 @@ async def generate_leila_response(
     user_message: str,
     user_info: UserInfo,
     memory: ConversationMemory,
-    context: Optional[Dict] = None
+    context: Optional[Dict] = None,
+    force_short: bool = False  # Добавляем опциональный параметр
 ) -> Tuple[str, ConversationMemory]:
     """Генерирует ответ Лейлы"""
     
     if not client:
         logger.error("❌ DeepSeek клиент не инициализирован")
         if user_info.is_maxim():
-            fallback = "Извини, милый, сейчас у меня технические сложности... Напиши мне позже? 💭"
+            fallback = "Извини, милый, сейчас у меня технические сложности... 💭"
         else:
-            fallback = "Извини, не могу сейчас ответить. Попробуй позже."
+            fallback = "Извини, не могу сейчас ответить."
         return fallback, memory
     
     is_maxim = user_info.is_maxim()
     
+    # Погода обрабатывается как обычно
     weather_response = await handle_weather_query(user_message)
     if weather_response:
         logger.info(f"🌤️ Запрос о погоде от {user_info.get_display_name()}")
         
         if is_maxim:
-            response = f"{weather_response}\n\nНадеюсь, эта информация полезна, мой дорогой! ☀️💖"
+            # Для непрямых обращений делаем короткий ответ о погоде
+            if force_short:
+                # Извлекаем только основную информацию
+                temp_match = re.search(r'(\d+)°C', weather_response)
+                desc_match = re.search(r'сейчас ([\w\s]+),', weather_response)
+                if temp_match and desc_match:
+                    response = f"{temp_match.group(1)}°C, {desc_match.group(1)}. ☀️"
+                else:
+                    response = weather_response.split('.')[0] + '.'
+            else:
+                response = f"{weather_response}\n\nНадеюсь, эта информация полезна, мой дорогой! ☀️💖"
         else:
             response = weather_response
         
@@ -1118,7 +1130,16 @@ async def generate_leila_response(
         return response, memory
     
     model_config = analyze_query_complexity(user_message, is_maxim)
+    
+    # Если нужно форсировать короткий ответ - ограничиваем токены
+    if force_short:
+        model_config["max_tokens"] = 60  # Очень коротко
+        model_config["temperature"] = 0.6  # Меньше креативности
+    
     logger.info(f"📊 Конфиг модели: {model_config['model']}, токены={model_config['max_tokens']}")
+    
+    # Остальной код функции остается без изменений...
+    # ... [остальная часть функции без изменений]
     
     system_prompt = generate_system_prompt(user_info, model_config)
     
@@ -1554,7 +1575,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         logger.info(f"👤 {'МАКСИМ' if is_maxim else 'Обычный'}: {user_name} (ID: {user.id}): {text[:50]}...")
         
-        # ФЛАГ ОТВЕТА НА СООБЩЕНИЕ БОТА
+        # ========== ОПРЕДЕЛЯЕМ ТИП ОБРАЩЕНИЯ ==========
+        is_direct_address = False
         is_reply_to_bot = False
         
         if chat.type in ("group", "supergroup"):
@@ -1566,41 +1588,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             text_lower = text.lower()
             bot_username_lower = bot_username.lower()
             
+            # Прямое обращение по имени
             mentioned_by_name = "лейла" in text_lower
+            # Прямое обращение по username
             mentioned_by_username = bot_username_lower and f"@{bot_username_lower}" in text_lower
             
-            # Проверяем реплай
+            # Проверяем реплай на сообщение бота
             if msg.reply_to_message:
                 reply_user = msg.reply_to_message.from_user
-                if reply_user:
-                    logger.info(f"📎 Ответ на сообщение от пользователя {reply_user.id} (бот: {bot_id})")
-                    if reply_user.id == bot_id:
-                        is_reply_to_bot = True
-                        logger.info(f"✅ Пользователь ответил на сообщение бота!")
+                if reply_user and reply_user.id == bot_id:
+                    is_reply_to_bot = True
+                    logger.info(f"✅ Пользователь ответил на сообщение бота!")
             
-            should_respond = is_maxim or mentioned_by_name or mentioned_by_username or is_reply_to_bot
+            # Прямое обращение - это когда:
+            # 1. Прямое упоминание по имени или username
+            # 2. Или реплай на бота
+            # 3. Или это Максим и его сообщение содержит вопросительные знаки или прямое обращение
+            if is_maxim:
+                # Для Максима считаем прямым обращением если:
+                # - Есть вопросительные знаки
+                # - Есть обращение по имени (даже если не "лейла")
+                # - Есть реплай на бота
+                # - Содержит слова-обращения
+                has_question = "?" in text
+                has_direct_words = any(word in text_lower for word in ["лейла", "скажи", "спроси", "ответь", "как ты"])
+                
+                is_direct_address = (mentioned_by_name or mentioned_by_username or 
+                                    is_reply_to_bot or has_question or has_direct_words)
+            else:
+                # Для других только явное обращение
+                is_direct_address = mentioned_by_name or mentioned_by_username or is_reply_to_bot
             
-            logger.info(f"👥 Условия ответа: Максим={is_maxim}, упомянута={mentioned_by_name}, username={mentioned_by_username}, reply={is_reply_to_bot}, отвечать={should_respond}")
+            should_respond = is_maxim or is_direct_address
+            
+            logger.info(f"👥 Условия: Максим={is_maxim}, прямое обращение={is_direct_address}, отвечать={should_respond}")
             
             if not should_respond:
                 logger.info(f"⏭️ Пропускаем (не выполнены условия ответа)")
                 return
+                
+            # ========== ДОПОЛНИТЕЛЬНО: ПРОПУСК ДЛЯ ЕСТЕСТВЕННОСТИ ==========
+            if is_maxim:
+                # Увеличиваем шанс ответа на прямое обращение
+                if is_direct_address:
+                    skip_chance = 0.05  # 5% шанс пропустить прямое обращение
+                else:
+                    skip_chance = 0.40  # 40% шанс пропустить непрямое сообщение
+                    
+                if random.random() < skip_chance:
+                    logger.info(f"💭 Пропускаем ответ Максиму для естественности (шанс: {skip_chance*100}%)")
+                    return
         else:
             # В личных сообщениях всегда отвечаем
             logger.info(f"💬 Личный чат, отвечаем всегда")
-        
-        # Дополнительно: если это реплай на бота, увеличиваем шанс ответа
-        if is_reply_to_bot and is_maxim:
-            # Если Максим отвечает на сообщение бота, почти всегда отвечаем
-            skip_chance = 0.05  # 5% шанс пропустить (было 15%)
-        elif is_maxim:
-            skip_chance = 0.15  # 15% шанс пропустить
-        else:
-            skip_chance = 0  # Обычным пользователям всегда отвечаем
-        
-        if is_maxim and random.random() < skip_chance:
-            logger.info(f"💭 Пропускаем ответ Максиму для естественности (шанс: {skip_chance*100}%)")
-            return
+            is_direct_address = True  # В личке всё считается прямым обращением
         
         memory = get_conversation_memory(user.id, chat.id)
         
@@ -1614,18 +1655,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         extra_context["season_context"] = f"Сейчас {season} в {BOT_LOCATION['city']}е"
         
         logger.info(f"🔄 Генерация ответа...")
-        reply, updated_memory = await generate_leila_response(
-            text, 
-            user_info, 
-            memory, 
-            extra_context
-        )
+        
+        # ========== КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ОГРАНИЧЕНИЕ ДЛИНЫ ДЛЯ НЕПРЯМЫХ ОБРАЩЕНИЙ ==========
+        if is_maxim and not is_direct_address:
+            # Для непрямых обращений Максима - ограничиваем длину ответа
+            original_max_tokens = None
+            
+            # Временно меняем конфиг модели для коротких ответов
+            model_config = analyze_query_complexity(text, is_maxim)
+            original_max_tokens = model_config.get("max_tokens", 200)
+            
+            # Сильно ограничиваем токены для коротких ответов
+            model_config["max_tokens"] = 80  # Очень короткие ответы
+            model_config["temperature"] = 0.7  # Средняя креативность
+            
+            logger.info(f"🔹 Непрямое обращение Максима - короткий ответ ({model_config['max_tokens']} токенов)")
+            
+            # Генерируем ответ с ограничением
+            reply, updated_memory = await generate_leila_response(
+                text, 
+                user_info, 
+                memory, 
+                extra_context
+            )
+            
+            # Дополнительно обрезаем ответ если он слишком длинный
+            sentences = reply.split('. ')
+            if len(sentences) > 2:
+                reply = '. '.join(sentences[:2]) + '.'
+                # Удаляем возможные дублирующиеся точки
+                reply = reply.replace('..', '.')
+                
+            logger.info(f"✂️ Обрезанный ответ на непрямое обращение: {reply[:100]}...")
+            
+        else:
+            # Для прямых обращений и других пользователей - обычный ответ
+            reply, updated_memory = await generate_leila_response(
+                text, 
+                user_info, 
+                memory, 
+                extra_context
+            )
         
         conversation_memories[get_memory_key(user.id, chat.id)] = updated_memory
         
         logger.info(f"📤 Отправка ответа ({len(reply)} chars)...")
         await context.bot.send_message(chat_id=chat.id, text=reply)
-        logger.info(f"✅ Ответ отправлен {'Максиму' if is_maxim else user_name}")
+        
+        # Логируем тип ответа
+        if is_maxim:
+            response_type = "прямое" if is_direct_address else "короткое"
+            logger.info(f"✅ {response_type} ответ отправлен Максиму")
+        else:
+            logger.info(f"✅ Ответ отправлен {user_name}")
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки: {e}", exc_info=True)
