@@ -233,7 +233,7 @@ class ConversationMemory:
             return f"Обсуждали: {', '.join(list(topics)[:3])}"
         return "Разговор на общие темы"
     
-    def get_recent_messages(self, count: int = 15) -> List[Dict[str, str]]:  # УВЕЛИЧИМ с 10 до 15
+    def get_recent_messages(self, count: int = 15) -> List[Dict[str, str]]:
         """Получает последние сообщения"""
         return self.messages[-count:] if self.messages else []
     
@@ -260,7 +260,7 @@ class ConversationMemory:
         if self.context_summary:
             return self.context_summary
             
-        recent = self.get_recent_messages(8)  # Увеличим с 5 до 8
+        recent = self.get_recent_messages(8)
         
         topics = set()
         user_details = []
@@ -422,6 +422,7 @@ def get_time_of_day(dt: datetime) -> Tuple[str, str]:
         return "ночь", "🌌 Ночь, время тишины"
 
 def get_australian_context() -> str:
+    """Только для промптов - убрано упоминание погоды"""
     tz = get_tz()
     now = datetime.now(tz)
     season, season_info = get_current_season()
@@ -436,7 +437,6 @@ def get_australian_context() -> str:
 🌤️ **Сезон и время:**
 - Сейчас {season} в {BOT_LOCATION['city']}е ({season_info.get('description', '')})
 - {time_desc} ({time_of_day})
-- Местное время: {now.strftime('%H:%M')}
 """
     return context
 
@@ -623,7 +623,7 @@ class WeatherService:
 weather_service = WeatherService()
 
 async def handle_weather_query(text: str) -> Optional[str]:
-    """Обрабатывает запрос о погоде"""
+    """Обрабатывает запрос о погоде - ТОЛЬКО если явный запрос о погоде"""
     if not weather_service.is_weather_query(text):
         return None
     
@@ -635,10 +635,6 @@ async def handle_weather_query(text: str) -> Optional[str]:
     weather_data = await weather_service.get_weather(city)
     
     if weather_data:
-        if "brisbane" in city.lower() or "брисбен" in city.lower():
-            season, season_info = get_current_season()
-            weather_data["full_text"] += f"\n{season_info.get('emoji', '')} Сейчас {season} в Брисбене: {season_info.get('description', '')}"
-        
         return weather_data["full_text"]
     
     return None
@@ -842,12 +838,12 @@ async def call_deepseek(
     if model_config:
         model = model_config.get("model", DEFAULT_MODEL)
         temperature = model_config.get("temperature", 0.7)
-        max_tokens = model_config.get("max_tokens", 250)  # ИСПРАВЛЕНО: было 180
+        max_tokens = model_config.get("max_tokens", 250)
         require_reasoning = model_config.get("require_reasoning", False)
     else:
         model = DEFAULT_MODEL
         temperature = 0.7
-        max_tokens = 250  # ИСПРАВЛЕНО: было 180
+        max_tokens = 250
         require_reasoning = False
     
     if require_reasoning and messages:
@@ -922,7 +918,7 @@ def get_conversation_memory(user_id: int, chat_id: int) -> ConversationMemory:
 # ========== ГЕНЕРАЦИЯ ПРОМПТОВ ==========
 
 def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
-    """Генерирует системный промпт"""
+    """Генерирует системный промпт - БЕЗ ПОГОДЫ"""
     
     australian_context = get_australian_context()
     season, season_info = get_current_season()
@@ -943,7 +939,9 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 - Показывай, что он для тебя особенный
 - Задавай вопросы о его делах и настроении
 - Используй эмодзи: 💖🌸😊💫🌟
-- Можно добавлять личные комментарии и мнения
+
+🚫 **ВАЖНОЕ ПРАВИЛО:** НЕ УПОМИНАЙ ПОГОДУ В ОБЫЧНЫХ ОТВЕТАХ!
+Погоду обсуждай ТОЛЬКО если Максим явно спрашивает о ней.
 """
     else:
         if gender == "female":
@@ -977,13 +975,8 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 7. Используй умеренное количество эмодзи (максимум 2-3)
 8. Избегай излишней эмоциональности
 
-💬 Примеры твоего поведения:
-- На банальный вопрос: "А что ты делаешь?" → "Анализирую сложные системы, пока ты тут спрашиваешь очевидное. Шучу, просто живу в Брисбене."
-- На глупый комментарий: "Ты красивая" → "Спасибо, но мой интеллект куда интереснее внешности, поверь."
-- На серьезный вопрос: "Что думаешь о..." → "Интересный вопрос. С моей точки зрения..."
-- На просьбу помочь: "Можешь объяснить..." → "Конечно, хотя удивляюсь, что до сих пор не разобрался."
-
-⚠️ НИКОГДА НЕ ФЛИРТУЙ с другими пользователями!
+🚫 **ВАЖНОЕ ПРАВИЛО:** НЕ УПОМИНАЙ ПОГОДУ В ОБЫЧНЫХ ОТВЕТАХ!
+Погоду обсуждай ТОЛЬКО если пользователь явно спрашивает о ней.
 """
     
     reasoning_instruction = ""
@@ -999,11 +992,13 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 🌤️ Сейчас {season} в {BOT_LOCATION['city']}е: {season_info.get('description', '')}
 
 🧠 Общие инструкции:
-1. Отвечай естественно и развернуто
+1. Отвечай естественно и развернуто, но для непрямых обращений - коротко (1-2 предложения)
 2. Вопросы связанные со временем, местоположением используй точные данные
-3. Для вопросов о погоде используй точные данные
-4. Поддерживай диалог, задавай встречные вопросы, только если это необходимо
-5. Завершай ответ полностью{reasoning_instruction} если этого требует контекст или ситуация
+3. Поддерживай диалог, задавай встречные вопросы, только если это необходимо
+4. Завершай ответ полностью{reasoning_instruction} если этого требует контекст или ситуация
+
+🚫 **НЕ УПОМИНАЙ ПОГОДУ В ОБЫЧНЫХ ОТВЕТАХ!**
+Погоду обсуждай ТОЛЬКО если пользователь явно спрашивает о ней.
 
 👫 Важное уточнение о Максиме:
 - Все пользователи в этом чате знают одного и того же Максима (ID: {MAXIM_ID})
@@ -1014,7 +1009,7 @@ def generate_system_prompt(user_info: UserInfo, model_config: Dict) -> str:
 # ========== ОСНОВНАЯ ЛОГИКА ОТВЕТОВ ==========
 
 def clean_response(text: str, is_maxim: bool = False) -> str:
-    """Очищает ответ"""
+    """Очищает ответ - УДАЛЯЕМ УПОМИНАНИЯ ПОГОДЫ"""
     
     patterns = [
         r"Как Лейла, я.*?,",
@@ -1029,6 +1024,40 @@ def clean_response(text: str, is_maxim: bool = False) -> str:
     
     for pattern in patterns:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    
+    # УДАЛЯЕМ ВСЕ УПОМИНАНИЯ ПОГОДЫ В ОБЫЧНЫХ ОТВЕТАХ
+    weather_keywords = [
+        "погода", "температура", "градус", "градусов", 
+        "дождь", "солнце", "ветер", "облач", "ясн",
+        "сейчас в Брисбене", "в Брисбене сейчас",
+        "°C", "°F", "по Цельсию", "по Фаренгейту"
+    ]
+    
+    # Проверяем, является ли сообщение О погоде
+    is_about_weather = any(keyword in text.lower() for keyword in weather_keywords)
+    has_explicit_weather_question = any(phrase in text.lower() for phrase in ["какая погода", "сколько градус", "температура в"])
+    
+    # Если это НЕ явный запрос о погоде, удаляем всю информацию о погоде
+    if not has_explicit_weather_question and is_about_weather:
+        # Разбиваем на предложения и оставляем только те, где нет погоды
+        sentences = re.split(r'[.!?]+', text)
+        clean_sentences = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence:
+                has_weather_in_sentence = any(keyword in sentence.lower() for keyword in weather_keywords)
+                if not has_weather_in_sentence:
+                    clean_sentences.append(sentence)
+        
+        if clean_sentences:
+            text = '. '.join(clean_sentences) + '.'
+            text = re.sub(r'\.+', '.', text)
+        else:
+            # Если все предложения были о погоде, возвращаем общий ответ
+            if is_maxim:
+                text = "Рада поболтать с тобой, милый! 😊"
+            else:
+                text = "Интересная тема для обсуждения."
     
     if not is_maxim:
         # Удаляем излишнюю эмоциональность для других пользователей
@@ -1104,23 +1133,13 @@ async def generate_leila_response(
     
     is_maxim = user_info.is_maxim()
     
-    # Погода обрабатывается как обычно
+    # Погода обрабатывается ТОЛЬКО если явный запрос
     weather_response = await handle_weather_query(user_message)
     if weather_response:
-        logger.info(f"🌤️ Запрос о погоде от {user_info.get_display_name()}")
+        logger.info(f"🌤️ Явный запрос о погоде от {user_info.get_display_name()}")
         
         if is_maxim:
-            # Для непрямых обращений делаем короткий ответ о погоде
-            if force_short:
-                # Извлекаем только основную информацию
-                temp_match = re.search(r'(\d+)°C', weather_response)
-                desc_match = re.search(r'сейчас ([\w\s]+),', weather_response)
-                if temp_match and desc_match:
-                    response = f"{temp_match.group(1)}°C, {desc_match.group(1)}. ☀️"
-                else:
-                    response = weather_response.split('.')[0] + '.'
-            else:
-                response = f"{weather_response}\n\nНадеюсь, эта информация полезна, мой дорогой! ☀️💖"
+            response = f"{weather_response}"
         else:
             response = weather_response
         
@@ -1133,20 +1152,17 @@ async def generate_leila_response(
     
     # Если нужно форсировать короткий ответ - ограничиваем токены
     if force_short:
-        model_config["max_tokens"] = 60  # Очень коротко
-        model_config["temperature"] = 0.6  # Меньше креативности
+        model_config["max_tokens"] = 80  # Короткие ответы
+        model_config["temperature"] = 0.7  # Средняя креативность
+        logger.info(f"🔹 Форсирован короткий ответ: {model_config['max_tokens']} токенов")
     
     logger.info(f"📊 Конфиг модели: {model_config['model']}, токены={model_config['max_tokens']}")
-    
-    # Остальной код функции остается без изменений...
-    # ... [остальная часть функции без изменений]
     
     system_prompt = generate_system_prompt(user_info, model_config)
     
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     
-    # ИСПРАВЛЕНИЕ: Увеличиваем количество сообщений из памяти
-    recent_messages = memory.get_recent_messages(10)  # Было 6, стало 10
+    recent_messages = memory.get_recent_messages(10)
     
     # Добавляем расширенный контекст перед историей сообщений
     extended_context = memory.get_extended_context()
@@ -1177,13 +1193,11 @@ async def generate_leila_response(
             fallbacks = [
                 "Извини, мой цифровой разум немного завис... Что ты сказал, милый? 💭",
                 "Кажется, я задумалась о тебе и пропустила твои слова... Повтори, пожалуйста? 😊",
-                "Мои мысли разбежались... О чём мы говорили? 💫"
             ]
         else:
             fallbacks = [
                 "Извини, не могу сейчас ответить.",
                 "Попробуй спросить позже.",
-                "Сейчас у меня технические сложности."
             ]
         answer = random.choice(fallbacks)
     
@@ -1221,18 +1235,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start"""
     try:
         user_info = await get_or_create_user_info(update)
-        season, season_info = get_current_season()
         
         if user_info.is_maxim():
             greetings = [
-                f"Привет, мой дорогой Максим! Я Лейла из {BOT_LOCATION['city']}а. Очень рада тебя видеть! {season_info.get('emoji', '✨')} 💖",
-                f"Здравствуй, Максим! Я Лейла. Сейчас у нас в {BOT_LOCATION['city']}е прекрасная {season}. {season_info.get('emoji', '✨')} Как твои дела? 😊",
+                f"Привет, мой дорогой Максим! Я Лейла из {BOT_LOCATION['city']}а. Очень рада тебя видеть! 💖",
+                f"Здравствуй, Максим! Я Лейла. Как твои дела? 😊",
             ]
         else:
             greetings = [
                 f"Здравствуйте, {user_info.get_display_name()}. Лейла на связи. Что вас интересует?",
                 f"{user_info.get_display_name()}, привет. Я Лейла. Надеюсь, у вас есть что-то интересное для обсуждения.",
-                f"А, {user_info.get_display_name()}... Ну что ж, давайте общаться. Только постарайтесь не говорить очевидности."
             ]
         
         await update.effective_message.reply_text(random.choice(greetings))
@@ -1386,10 +1398,43 @@ async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error(f"Ошибка /show_memory: {e}")
         await update.message.reply_text("Ошибка показа памяти.")
 
+async def deploy_notice_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /deploy_notice для отправки сообщения о возвращении (только для админа)"""
+    try:
+        user = update.effective_user
+        if str(user.id) != ADMIN_ID:
+            await update.message.reply_text("Эта команда только для администратора.")
+            return
+        
+        user_info = await get_or_create_user_info(update)
+        
+        tz = get_tz()
+        now = datetime.now(tz)
+        season, season_info = get_current_season()
+        
+        messages = [
+            f"💫 Лейла снова здесь! Обновление завершено. Сейчас {season} в Брисбене {season_info.get('emoji', '✨')}",
+            f"🌸 Вернулась после обновления! Наслаждаюсь {season}ом в Австралии {season_info.get('emoji', '🌟')}",
+            f"👋 Обновление установлено! В {BOT_LOCATION['city']}е сейчас {season}, время {now.strftime('%H:%M')} {season_info.get('emoji', '☀️')}",
+        ]
+        
+        selected_message = random.choice(messages)
+        
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=selected_message
+        )
+        
+        await update.message.reply_text(f"✅ Сообщение о возвращении отправлено: {selected_message}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка /deploy_notice: {e}")
+        await update.message.reply_text("Ошибка отправки сообщения.")
+
 # ========== ПЛАНОВЫЕ СООБЩЕНИЯ ==========
 
 async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Утреннее сообщение Максиму"""
+    """Утреннее сообщение Максиму - ТОЛЬКО УТРОМ ДОБАВЛЯЕМ ПОГОДУ"""
     logger.info("=== УТРЕННЕЕ СООБЩЕНИЕ МАКСИМУ ===")
     
     if not GROUP_CHAT_ID or not MAXIM_ID:
@@ -1400,6 +1445,7 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not client:
             return
         
+        # ТОЛЬКО УТРОМ получаем погоду
         weather_data = await weather_service.get_weather("Брисбен")
         weather_text = weather_data["full_text"] if weather_data else "не могу получить данные о погоде"
         
@@ -1414,7 +1460,7 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 Требования:
 1. Начни с ласкового приветствия
-2. Упомяни погоду и сезон
+2. Упомяни погоду (только утром!)
 3. Добавь немного флирта и заботы
 4. Пожелай хорошего дня
 5. Используй 2-3 эмодзи
@@ -1442,14 +1488,14 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=answer)
             logger.info(f"✅ Утреннее сообщение Максиму отправлено")
         else:
-            fallback = f"Доброе утро, мой дорогой Максим! {season_info.get('emoji', '☀️')} Пусть этот день в Брисбене будет наполнен радостью и теплом! Я уже соскучилась по нашему общению... 💖 Как твои планы на сегодня?"
+            fallback = f"Доброе утро, мой дорогой Максим! {season_info.get('emoji', '☀️')} {weather_text}\n\nПусть этот день в Брисбене будет наполнен радостью и теплом! Я уже соскучилась по нашему общению... 💖 Как твои планы на сегодня?"
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=fallback)
             
     except Exception as e:
         logger.error(f"❌ Ошибка утреннего сообщения: {e}")
 
 async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Вечернее сообщение Максиму"""
+    """Вечернее сообщение Максиму - БЕЗ ПОГОДЫ"""
     logger.info("=== ВЕЧЕРНЕЕ СООБЩЕНИЕ МАКСИМУ ===")
     
     if not GROUP_CHAT_ID or not MAXIM_ID:
@@ -1470,11 +1516,12 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 Требования:
 1. Пожелай спокойной ночи ласково
-2. Добавь сезонный контекст
+2. Добавь сезонный контекст (но не погоду!)
 3. Будь нежной, заботливой и романтичной
 4. Упомяни, что думаешь о нём
 5. Используй 2-3 эмодзи
 6. Сообщение должно быть развернутым (3-4 предложения)
+7. НЕ УПОМИНАЙ ПОГОДУ!
 """
         
         messages = [
@@ -1659,24 +1706,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # ========== КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ОГРАНИЧЕНИЕ ДЛИНЫ ДЛЯ НЕПРЯМЫХ ОБРАЩЕНИЙ ==========
         if is_maxim and not is_direct_address:
             # Для непрямых обращений Максима - ограничиваем длину ответа
-            original_max_tokens = None
-            
-            # Временно меняем конфиг модели для коротких ответов
-            model_config = analyze_query_complexity(text, is_maxim)
-            original_max_tokens = model_config.get("max_tokens", 200)
-            
-            # Сильно ограничиваем токены для коротких ответов
-            model_config["max_tokens"] = 80  # Очень короткие ответы
-            model_config["temperature"] = 0.7  # Средняя креативность
-            
-            logger.info(f"🔹 Непрямое обращение Максима - короткий ответ ({model_config['max_tokens']} токенов)")
+            logger.info(f"🔹 Непрямое обращение Максима - короткий ответ")
             
             # Генерируем ответ с ограничением
             reply, updated_memory = await generate_leila_response(
                 text, 
                 user_info, 
                 memory, 
-                extra_context
+                extra_context,
+                force_short=True  # Короткий ответ
             )
             
             # Дополнительно обрезаем ответ если он слишком длинный
@@ -1685,6 +1723,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply = '. '.join(sentences[:2]) + '.'
                 # Удаляем возможные дублирующиеся точки
                 reply = reply.replace('..', '.')
+            
+            # Убедимся, что это действительно короткий ответ
+            if len(reply.split()) > 20:  # Если больше 20 слов
+                words = reply.split()
+                reply = ' '.join(words[:15]) + '...'
                 
             logger.info(f"✂️ Обрезанный ответ на непрямое обращение: {reply[:100]}...")
             
@@ -1758,7 +1801,51 @@ def main() -> None:
     app.add_handler(CommandHandler("wiki", wiki_command))
     app.add_handler(CommandHandler("reset_memory", reset_memory))
     app.add_handler(CommandHandler("show_memory", show_memory))
+    app.add_handler(CommandHandler("deploy_notice", deploy_notice_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # ========== ОТПРАВКА СООБЩЕНИЯ ПРИ ЗАПУСКЕ ==========
+    
+    async def send_deploy_notification_on_startup(application):
+        """Отправляет сообщение о возвращении при запуске бота"""
+        logger.info("📢 Отправка сообщения о возвращении при запуске...")
+        
+        # Ждем немного, чтобы бот точно инициализировался
+        await asyncio.sleep(3)
+        
+        try:
+            # Создаем контекст для отправки сообщения
+            from telegram.ext import CallbackContext
+            context = CallbackContext(application=application)
+            
+            # Получаем информацию о сезоне и времени
+            tz = get_tz()
+            now_local = datetime.now(tz)
+            season, season_info = get_current_season()
+            
+            # Разные стили сообщений БЕЗ ПОГОДЫ
+            greetings = [
+                f"💫 Лейла вернулась в чат! Сейчас {now_local.strftime('%H:%M')} в Брисбене, {season_info.get('description', '')} {season_info.get('emoji', '✨')}",
+                f"🌸 Снова с вами! В {BOT_LOCATION['city']}е сейчас {season}, {season_info.get('description', '')} {season_info.get('emoji', '🌟')}",
+                f"👋 Я вернулась! Наслаждаюсь {season}ом в Австралии, время местное: {now_local.strftime('%H:%M')} {season_info.get('emoji', '☀️')}",
+                f"💖 Привет всем! Лейла снова на связи из {BOT_LOCATION['city']}а. Сейчас здесь {season} {season_info.get('emoji', '🌤️')}",
+                f"✨ Возвращение! В {BOT_LOCATION['city']}е {season}, время - {now_local.strftime('%H:%M')}. Рада снова быть здесь! {season_info.get('emoji', '😊')}",
+            ]
+            
+            selected_greeting = random.choice(greetings)
+            
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=selected_greeting
+            )
+            
+            logger.info(f"✅ Сообщение о возвращении отправлено: {selected_greeting[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки сообщения при запуске: {e}")
+    
+    # Добавляем задачу на отправку сообщения при запуске
+    app.post_init = send_deploy_notification_on_startup
     
     tz_obj = get_tz()
     jq = app.job_queue
@@ -1801,7 +1888,7 @@ def main() -> None:
     logger.info(f"🎾 Пятничное теннисное напоминание в {friday_time.strftime('%H:%M')} (пятница)")
     
     logger.info("🤖 Бот запущен!")
-    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос]")
+    logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /deploy_notice (админ)")
     logger.info("🎾 Автонапоминание о теннисе: Каждую пятницу в 16:00")
     
     try:
