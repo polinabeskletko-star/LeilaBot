@@ -346,8 +346,7 @@ else:
 # ========== ГЕОГРАФИЧЕСКИЕ ФУНКЦИИ ==========
 
 def get_tz() -> pytz.timezone:
-    tz = pytz.timezone(BOT_TZ)
-    return tz
+    return pytz.timezone(BOT_TZ)
 
 def get_season_for_location(month: int, hemisphere: str = "southern") -> str:
     if hemisphere == "southern":
@@ -435,12 +434,9 @@ def get_australian_context() -> str:
 - Южное полушарие (сезоны наоборот)
 - Часовой пояс: {BOT_TZ}
 
-📅 **Текущая дата и время:**
-- {now.strftime('%d %B %Y года')}
-- День недели: {now.strftime('%A')}
+🌤️ **Сезон и время:**
 - Сейчас {season} в {BOT_LOCATION['city']}е ({season_info.get('description', '')})
 - {time_desc} ({time_of_day})
-- Местное время: {now.strftime('%H:%M')}
 """
     return context
 
@@ -773,7 +769,7 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
             max_tokens = 250
             reason = "non_maxim_reasoning"
             require_reasoning = True
-        # Для комплексных вопросы - v3 модель
+        # Для комплексных вопросов - v3 модель
         elif is_complex:
             model = DEEPSEEK_MODELS["v3"]
             temperature = 0.7
@@ -1554,30 +1550,19 @@ async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"❌ Ошибка вечернего сообщения: {e}")
 
 async def send_friday_tennis_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Friday tennis reminder - ПРОВЕРЯЕМ ДЕНЬ НЕДЕЛИ"""
+    """Friday tennis reminder - SIMPLE VERSION"""
     logger.info("=== ПЯТНИЧНЫЙ ТЕННИСНЫЙ РЕМИНДЕР ===")
-    
-    # СНАЧАЛА проверяем, что сегодня пятница
-    tz = get_tz()
-    now = datetime.now(tz)
-    
-    # Пятница = 4 (Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4)
-    if now.weekday() != 4:
-        logger.info(f"⏭️ Сегодня {now.strftime('%A')} ({now.strftime('%d.%m.%Y')}), не пятница - пропускаем напоминание")
-        return
-    
-    logger.info(f"🎾 ПЯТНИЧНЫЙ ТЕННИСНЫЙ РЕМИНДЕР ({now.strftime('%d.%m.%Y %H:%M')})")
     
     if not GROUP_CHAT_ID:
         return
     
     try:
+        # Simple message with the code
         message = f"""🎾 *Пятничный теннис!*
 
-📅 Сегодня {now.strftime('%d.%m.%Y')} (пятница)
-⏰ Время: 16:30
-🔑 Код доступа: `{TENNIS_ACCESS_CODE}`
-📅 Действует до: {TENNIS_CODE_VALID_UNTIL}
+Время: 16:30
+Код доступа: `{TENNIS_ACCESS_CODE}`
+Действует до: {TENNIS_CODE_VALID_UNTIL}
 
 Увидимся на кортах! 😊"""
         
@@ -1798,8 +1783,6 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info(f"🚀 ЗАПУСК БОТА ЛЕЙЛА")
     logger.info(f"📍 Локация: {BOT_LOCATION['city']}, {BOT_LOCATION['country']}")
-    logger.info(f"📅 Текущая дата: {now.strftime('%d %B %Y года')}")
-    logger.info(f"📅 День недели: {now.strftime('%A')}")
     logger.info(f"📅 Сезон: {season} ({season_info.get('description', '')})")
     logger.info(f"🕐 Время: {now.strftime('%H:%M:%S')}")
     logger.info(f"💬 Группа ID: {GROUP_CHAT_ID}")
@@ -1883,7 +1866,7 @@ def main() -> None:
         time=morning_time,
         name="leila-morning"
     )
-    logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time.strftime('%H:%M')}")
+    logger.info(f"🌅 Утреннее сообщение Максиму в {morning_time}")
     
     # Evening message to Maxim at 9:10 PM
     evening_time = time(hour=21, minute=10, tzinfo=tz_obj)
@@ -1892,22 +1875,17 @@ def main() -> None:
         time=evening_time,
         name="leila-evening"
     )
-    logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time.strftime('%H:%M')}")
+    logger.info(f"🌃 Вечернее сообщение Максиму в {evening_time}")
     
-    # Friday tennis reminder at 4 PM (16:00) - ТОЛЬКО ПЯТНИЦА
+    # Friday tennis reminder at 4 PM (16:00)
     friday_time = time(hour=16, minute=0, tzinfo=tz_obj)
     jq.run_daily(
         send_friday_tennis_reminder,
         time=friday_time,
-        days=(4,),  # ТОЛЬКО ПЯТНИЦА (4)
+        days=(4,),  # 4 represents Friday (Monday=0, Tuesday=1, ..., Friday=4)
         name="friday-tennis"
     )
-    logger.info(f"🎾 Пятничное теннисное напоминание в {friday_time.strftime('%H:%M')} (день недели=4=пятница)")
-    
-    # Выведите все активные задачи
-    logger.info(f"📋 Активных задач в планировщике: {len(jq.jobs())}")
-    for job in jq.jobs():
-        logger.info(f"  - {job.name}: время={job.next_t.strftime('%H:%M') if job.next_t else 'N/A'}")
+    logger.info(f"🎾 Пятничное теннисное напоминание в {friday_time.strftime('%H:%M')} (пятница)")
     
     logger.info("🤖 Бот запущен!")
     logger.info("📝 Доступные команды: /start, /weather [город], /wiki [запрос], /deploy_notice (админ)")
