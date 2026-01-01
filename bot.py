@@ -1882,7 +1882,7 @@ def main() -> None:
     jq.run_daily(
         send_friday_tennis_reminder,
         time=friday_time,
-        days=(4,),  # 4 represents Friday (Monday=0, Tuesday=1, ..., Friday=4)
+        days=(5,),  # 4 represents Friday (Monday=0, Tuesday=1, ..., Friday=4)
         name="friday-tennis"
     )
     logger.info(f"🎾 Пятничное теннисное напоминание в {friday_time.strftime('%H:%M')} (пятница)")
