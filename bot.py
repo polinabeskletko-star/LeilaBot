@@ -80,7 +80,7 @@ except ValueError:
     MAXIM_ID = 0
 
 # Теннисный код и дата действия
-TENNIS_ACCESS_CODE = "33836555#"
+TENNIS_ACCESS_CODE = "31806567#"
 TENNIS_CODE_VALID_UNTIL = "12 апреля 2026"
 
 # ========== ДАТАКЛАССЫ ==========
