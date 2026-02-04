@@ -420,6 +420,98 @@ def get_time_of_day(dt: datetime) -> Tuple[str, str]:
         return "поздний вечер", "🌃 Поздний вечер"
     else:
         return "ночь", "🌌 Ночь, время тишины"
+# ========== ЛУНА / ЛУННЫЙ ЦИКЛ ==========
+
+SYNODIC_MONTH = 29.530588853  # средняя длина синодического месяца (сутки)
+
+def _moon_age_days(dt_utc: datetime) -> float:
+    """
+    Возвращает возраст Луны (в сутках) с момента новолуния.
+    Алгоритм: берём опорное новолуние и считаем сколько дней прошло по модулю синодического месяца.
+    """
+    # Опорное новолуние: 2000-01-06 18:14 UTC (часто используется как reference)
+    # (можно менять, но это нормальная константа)
+    ref_new_moon = datetime(2000, 1, 6, 18, 14, tzinfo=pytz.UTC)
+
+    delta_days = (dt_utc - ref_new_moon).total_seconds() / 86400.0
+    age = delta_days % SYNODIC_MONTH
+    return age
+
+def get_moon_phase(dt_local: Optional[datetime] = None) -> Dict[str, Any]:
+    """
+    Возвращает фазу Луны для локального времени (по BOT_TZ).
+    Результат:
+      - age_days: возраст Луны в сутках
+      - phase: название фазы (новолуние, растущая, полнолуние, убывающая)
+      - phase_detail: более детально (растущий серп, первая четверть, ...)
+      - emoji: эмодзи
+      - illumination_pct: примерная освещённость (0..100)
+    """
+    tz = get_tz()
+    if dt_local is None:
+        dt_local = datetime.now(tz)
+
+    # Переводим в UTC, чтобы возраст Луны считался стабильно
+    dt_utc = dt_local.astimezone(pytz.UTC)
+    age = _moon_age_days(dt_utc)
+
+    # Примерная освещенность (очень грубо, но для “какая фаза” ок)
+    # 0..1..0 по косинусу
+    import math
+    illumination = (1 - math.cos(2 * math.pi * (age / SYNODIC_MONTH))) / 2
+    illumination_pct = int(round(illumination * 100))
+
+    # Детальная классификация по возрасту
+    # Границы можно немного двигать — это не астрономический календарь, а дружелюбная фаза
+    if age < 1.0 or age > (SYNODIC_MONTH - 1.0):
+        phase = "новолуние"
+        detail = "новолуние"
+        emoji = "🌑"
+    elif 1.0 <= age < 6.382:  # ~ до первой четверти
+        phase = "растущая"
+        detail = "растущий серп"
+        emoji = "🌒"
+    elif 6.382 <= age < 8.382:
+        phase = "растущая"
+        detail = "первая четверть"
+        emoji = "🌓"
+    elif 8.382 <= age < 13.765:
+        phase = "растущая"
+        detail = "растущая луна"
+        emoji = "🌔"
+    elif 13.765 <= age < 15.765:
+        phase = "полнолуние"
+        detail = "полнолуние"
+        emoji = "🌕"
+    elif 15.765 <= age < 21.148:
+        phase = "убывающая"
+        detail = "убывающая луна"
+        emoji = "🌖"
+    elif 21.148 <= age < 23.148:
+        phase = "убывающая"
+        detail = "последняя четверть"
+        emoji = "🌗"
+    else:
+        phase = "убывающая"
+        detail = "убывающий серп"
+        emoji = "🌘"
+
+    return {
+        "age_days": round(age, 1),
+        "phase": phase,
+        "phase_detail": detail,
+        "emoji": emoji,
+        "illumination_pct": illumination_pct,
+        "local_time": dt_local.strftime("%Y-%m-%d %H:%M"),
+    }
+
+def format_moon_phrase(moon: Dict[str, Any]) -> str:
+    """
+    Короткая фраза для сообщений.
+    """
+    # Пример: "🌒 Луна: растущая (растущий серп), ~23% освещённости"
+    return f"{moon['emoji']} Луна: {moon['phase']} ({moon['phase_detail']}), ~{moon['illumination_pct']}% света"
+
 
 def get_australian_context() -> str:
     """Только для промптов - убрано упоминание погоды"""
@@ -1492,12 +1584,20 @@ async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
         weather_text = weather_data["full_text"] if weather_data else "не могу получить данные о погоде"
         
         season, season_info = get_current_season()
+        tz = get_tz()
+        now_local = datetime.now(tz)
+
+        # 🌙 Луна на сегодня
+        moon = get_moon_phase(now_local)
+        moon_text = format_moon_phrase(moon)
+
         
         prompt = f"""Создай нежное, тёплое утреннее приветствие для Максима от Лейлы.
 
 Контекст:
 - Сейчас {season} в Брисбене ({season_info.get('description', '')})
 - Погода: {weather_text}
+- Луна: {moon_text}
 - Лейла только проснулась и первая мысль о Максиме
 
 Требования:
@@ -1803,6 +1903,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         except:
             pass
+ #=========== ФУНКЦИЯ ВЫДАЧИ ЛУННОГО ЦИКЛА ============
+    async def moon_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tz = get_tz()
+    now_local = datetime.now(tz)
+    moon = get_moon_phase(now_local)
+    await update.message.reply_text(f"Сегодня в {BOT_LOCATION['city']}е:\n{format_moon_phrase(moon)}\nВозраст: {moon['age_days']} суток")
 
 # ========== MAIN ==========
 
@@ -1845,6 +1951,8 @@ def main() -> None:
     app.add_handler(CommandHandler("show_memory", show_memory))
     app.add_handler(CommandHandler("deploy_notice", deploy_notice_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("moon", moon_command))
+
     
     # ========== ОТПРАВКА СООБЩЕНИЯ ПРИ ЗАПУСКЕ ==========
     
