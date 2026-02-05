@@ -1243,7 +1243,7 @@ def main() -> None:
     jq.run_daily(
         send_friday_tennis_reminder,
         time=time(hour=16, minute=0, tzinfo=tz_obj),
-        days=(4,),
+        days=(5,),
         name="friday-tennis",
     )
 
