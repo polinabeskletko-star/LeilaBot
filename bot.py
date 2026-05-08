@@ -85,8 +85,8 @@ except ValueError:
     MAXIM_ID = 0
 
 # Теннис
-TENNIS_ACCESS_CODE = "31806567#"
-TENNIS_CODE_VALID_UNTIL = "12 апреля 2026"
+TENNIS_ACCESS_CODE = "30816515#"
+TENNIS_CODE_VALID_UNTIL = "12 июля 2026"
 
 # ========== ДАТАКЛАССЫ ==========
 
