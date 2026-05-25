@@ -181,7 +181,7 @@ class MemoryStore:
         self._init_db()
 
     def _connect(self):
-    return sqlite3.connect(
+        return sqlite3.connect(
         self.path,
         check_same_thread=False,
         timeout=30,
