@@ -94,9 +94,9 @@ LEILA_MOODS = [
     "обычное",
     "саркастичное",
     "сонное",
-    "философское",
-    "хаотичное",
-    "усталое, но наблюдательное",
+    "усталое",
+    "спокойное",
+    "ироничное",
 ]
 
 MOON_MOOD_COMMENTS = {
@@ -1304,6 +1304,11 @@ def generate_system_prompt(
 - не упоминай погоду без явного вопроса;
 - можешь использовать 0-2 эмодзи;
 - иногда можно ответить сухо, лениво или с сарказмом.
+- не используй случайные абсурдные образы повторно;
+- не зацикливайся на одной шутке;
+- не придумывай постоянные мемы без причины;
+- говори естественно, как обычный человек;
+- избегай сюрреалистичных сравнений;
 
 {maybe_add_maxim_context()}
 
@@ -1556,7 +1561,7 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         model_config = {
             "model": DEEPSEEK_MODELS["chat"],
-            "temperature": 0.9,
+            "temperature": 0.72,
             "max_tokens": 240,
             "require_reasoning": False,
         }
@@ -1617,7 +1622,7 @@ async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         model_config = {
             "model": DEEPSEEK_MODELS["chat"],
-            "temperature": 0.9,
+            "temperature": 0.78,
             "max_tokens": 220,
             "require_reasoning": False,
         }
