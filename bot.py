@@ -1,11 +1,13 @@
 import os
 import re
+import json
 import random
+import sqlite3
 import asyncio
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import pytz
 import httpx
@@ -13,6 +15,7 @@ import wikipedia
 from openai import OpenAI
 
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -21,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-# ========== ЛОГИРОВАНИЕ ===========
+# ========== ЛОГИРОВАНИЕ ==========
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,19 +36,17 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN", "")
 
-# DeepSeek вместо OpenAI
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEFAULT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 DEEPSEEK_MODELS = {
     "chat": "deepseek-chat",
-    "v3": "deepseek-v3",
-    "r1": "deepseek-r1",
-    "coder": "deepseek-coder-v2",
+    "v3": "deepseek-chat",
+    "r1": "deepseek-reasoner",
+    "coder": "deepseek-chat",
 }
 
-# Администратор
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "")
 try:
     ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW else 0
@@ -55,10 +56,8 @@ except ValueError:
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
 
-# Настройка Википедии
 wikipedia.set_lang("ru")
 
-# ГЕОГРАФИЯ
 BOT_LOCATION = {
     "city": "Брисбен",
     "country": "Австралия",
@@ -66,9 +65,9 @@ BOT_LOCATION = {
     "hemisphere": "southern",
     "coordinates": {"lat": -27.4698, "lon": 153.0251},
 }
+
 BOT_TZ = BOT_LOCATION["timezone"]
 
-# Общий чат
 GROUP_CHAT_ID_RAW = os.getenv("GROUP_CHAT_ID", "")
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_RAW) if GROUP_CHAT_ID_RAW else 0
@@ -76,7 +75,6 @@ except ValueError:
     logger.warning("GROUP_CHAT_ID некорректен")
     GROUP_CHAT_ID = 0
 
-# Максим
 TARGET_USER_ID_RAW = os.getenv("TARGET_USER_ID", "")
 try:
     MAXIM_ID = int(TARGET_USER_ID_RAW) if TARGET_USER_ID_RAW else 0
@@ -84,9 +82,372 @@ except ValueError:
     logger.warning("TARGET_USER_ID некорректен")
     MAXIM_ID = 0
 
-# Теннис
 TENNIS_ACCESS_CODE = "30816515#"
 TENNIS_CODE_VALID_UNTIL = "12 июля 2026"
+
+DB_PATH = os.getenv("LEILA_DB_PATH", "leila_memory.sqlite3")
+
+RANDOM_GROUP_REPLY_RATE = float(os.getenv("RANDOM_GROUP_REPLY_RATE", "0.15"))
+MAXIM_JOKE_RATE = float(os.getenv("MAXIM_JOKE_RATE", "0.12"))
+
+LEILA_MOODS = [
+    "обычное",
+    "саркастичное",
+    "сонное",
+    "философское",
+    "хаотичное",
+    "усталое, но наблюдательное",
+]
+
+MOON_MOOD_COMMENTS = {
+    "новолуние": [
+        "Хороший день, чтобы начать что-то новое. Или хотя бы сделать вид.",
+        "Энергии может быть мало, зато поводов драматизировать — достаточно.",
+        "Сегодня лучше не требовать от людей чудес. Особенно до кофе.",
+    ],
+    "растущая": [
+        "День подходит для планов, роста и красивых обещаний самому себе.",
+        "Можно начинать дела. Даже те, которые потом героически бросите.",
+        "Энергия растёт. Главное — не потратить её на спор в интернете.",
+    ],
+    "полнолуние": [
+        "Сегодня люди могут быть особенно странными. Но не всё надо списывать на Луну.",
+        "Эмоции могут быть громче обычного. Берегите себя и чужие нервы.",
+        "Если кто-то сегодня слишком уверен в своей правоте — дышим глубже.",
+    ],
+    "убывающая": [
+        "Хороший день, чтобы завершать старое и отпускать лишнее.",
+        "Можно разгрести хвосты. Хотя бы морально.",
+        "Энергия идёт на спад, так что героизм сегодня не обязателен.",
+    ],
+}
+
+# ========== SQLite MEMORY ==========
+
+class MemoryStore:
+    def __init__(self, path: str):
+        self.path = path
+        self._init_db()
+
+    def _connect(self):
+        return sqlite3.connect(self.path)
+
+    def _init_db(self):
+        with self._connect() as conn:
+            cur = conn.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    first_name TEXT,
+                    last_name TEXT,
+                    username TEXT,
+                    gender TEXT,
+                    first_seen TEXT,
+                    last_seen TEXT,
+                    message_count INTEGER DEFAULT 0,
+                    facts_json TEXT DEFAULT '[]',
+                    topics_json TEXT DEFAULT '[]'
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_memory (
+                    chat_id INTEGER PRIMARY KEY,
+                    last_activity TEXT,
+                    message_count INTEGER DEFAULT 0,
+                    recent_messages_json TEXT DEFAULT '[]',
+                    summary TEXT DEFAULT '',
+                    inside_jokes_json TEXT DEFAULT '[]'
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER,
+                    user_id INTEGER,
+                    role TEXT,
+                    name TEXT,
+                    content TEXT,
+                    created_at TEXT
+                )
+            """)
+
+            conn.commit()
+
+    def upsert_user(self, user_info: "UserInfo"):
+        now = datetime.now(pytz.UTC).isoformat()
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT user_id, message_count FROM users WHERE user_id = ?", (user_info.id,))
+            existing = cur.fetchone()
+
+            if existing:
+                cur.execute("""
+                    UPDATE users
+                    SET first_name = ?,
+                        last_name = ?,
+                        username = ?,
+                        gender = ?,
+                        last_seen = ?
+                    WHERE user_id = ?
+                """, (
+                    user_info.first_name,
+                    user_info.last_name,
+                    user_info.username,
+                    user_info.gender,
+                    now,
+                    user_info.id,
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO users (
+                        user_id, first_name, last_name, username, gender,
+                        first_seen, last_seen, message_count,
+                        facts_json, topics_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, '[]', '[]')
+                """, (
+                    user_info.id,
+                    user_info.first_name,
+                    user_info.last_name,
+                    user_info.username,
+                    user_info.gender,
+                    now,
+                    now,
+                ))
+
+            conn.commit()
+
+    def increment_user_message(self, user_id: int):
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE users
+                SET message_count = message_count + 1,
+                    last_seen = ?
+                WHERE user_id = ?
+            """, (datetime.now(pytz.UTC).isoformat(), user_id))
+            conn.commit()
+
+    def add_user_fact(self, user_id: int, fact: str):
+        fact = fact.strip()
+        if not fact:
+            return
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT facts_json FROM users WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            facts = json.loads(row[0]) if row and row[0] else []
+
+            if fact not in facts:
+                facts.append(fact)
+                facts = facts[-20:]
+
+            cur.execute(
+                "UPDATE users SET facts_json = ? WHERE user_id = ?",
+                (json.dumps(facts, ensure_ascii=False), user_id),
+            )
+            conn.commit()
+
+    def add_user_topic(self, user_id: int, topic: str):
+        topic = topic.strip()
+        if not topic:
+            return
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT topics_json FROM users WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            topics = json.loads(row[0]) if row and row[0] else []
+
+            if topic not in topics:
+                topics.append(topic)
+                topics = topics[-20:]
+
+            cur.execute(
+                "UPDATE users SET topics_json = ? WHERE user_id = ?",
+                (json.dumps(topics, ensure_ascii=False), user_id),
+            )
+            conn.commit()
+
+    def add_message(self, chat_id: int, user_id: int, role: str, name: str, content: str):
+        now = datetime.now(pytz.UTC).isoformat()
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+
+            cur.execute("""
+                INSERT INTO messages (chat_id, user_id, role, name, content, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chat_id, user_id, role, name, content, now))
+
+            cur.execute("SELECT recent_messages_json FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            row = cur.fetchone()
+            recent = json.loads(row[0]) if row and row[0] else []
+
+            recent.append({
+                "role": role,
+                "name": name,
+                "content": content,
+                "created_at": now,
+            })
+            recent = recent[-50:]
+
+            if row:
+                cur.execute("""
+                    UPDATE chat_memory
+                    SET last_activity = ?,
+                        message_count = message_count + 1,
+                        recent_messages_json = ?
+                    WHERE chat_id = ?
+                """, (now, json.dumps(recent, ensure_ascii=False), chat_id))
+            else:
+                cur.execute("""
+                    INSERT INTO chat_memory (
+                        chat_id, last_activity, message_count,
+                        recent_messages_json, summary, inside_jokes_json
+                    )
+                    VALUES (?, ?, 1, ?, '', '[]')
+                """, (chat_id, now, json.dumps(recent, ensure_ascii=False)))
+
+            conn.commit()
+
+    def get_user_profile_text(self, user_id: int) -> str:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT first_name, last_name, username, gender, message_count, facts_json, topics_json
+                FROM users
+                WHERE user_id = ?
+            """, (user_id,))
+            row = cur.fetchone()
+
+        if not row:
+            return ""
+
+        first_name, last_name, username, gender, message_count, facts_json, topics_json = row
+        facts = json.loads(facts_json or "[]")
+        topics = json.loads(topics_json or "[]")
+
+        parts = [
+            f"Пользователь: {' '.join([x for x in [first_name, last_name] if x]).strip() or username or user_id}",
+            f"Сообщений: {message_count}",
+        ]
+
+        if topics:
+            parts.append(f"Темы, которые часто всплывали: {', '.join(topics[-8:])}")
+
+        if facts:
+            parts.append(f"Запомненные детали: {'; '.join(facts[-8:])}")
+
+        return "\n".join(parts)
+
+    def get_chat_context_text(self, chat_id: int) -> str:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT message_count, recent_messages_json, summary, inside_jokes_json
+                FROM chat_memory
+                WHERE chat_id = ?
+            """, (chat_id,))
+            row = cur.fetchone()
+
+        if not row:
+            return ""
+
+        message_count, recent_json, summary, jokes_json = row
+        recent = json.loads(recent_json or "[]")
+        jokes = json.loads(jokes_json or "[]")
+
+        last_lines = []
+        for msg in recent[-12:]:
+            name = msg.get("name", "Кто-то")
+            content = msg.get("content", "")
+            role = msg.get("role", "user")
+            if role == "user":
+                last_lines.append(f"{name}: {content}")
+            else:
+                last_lines.append(f"Лейла: {content}")
+
+        parts = [f"В этом чате накоплено сообщений: {message_count}"]
+
+        if summary:
+            parts.append(f"Краткая память чата: {summary}")
+
+        if jokes:
+            parts.append(f"Локальные мемы: {'; '.join(jokes[-8:])}")
+
+        if last_lines:
+            parts.append("Недавний контекст:\n" + "\n".join(last_lines))
+
+        return "\n\n".join(parts)
+
+    def add_inside_joke(self, chat_id: int, joke: str):
+        joke = joke.strip()
+        if not joke:
+            return
+
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT inside_jokes_json FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            row = cur.fetchone()
+            jokes = json.loads(row[0]) if row and row[0] else []
+
+            if joke not in jokes:
+                jokes.append(joke)
+                jokes = jokes[-20:]
+
+            if row:
+                cur.execute(
+                    "UPDATE chat_memory SET inside_jokes_json = ? WHERE chat_id = ?",
+                    (json.dumps(jokes, ensure_ascii=False), chat_id),
+                )
+            else:
+                cur.execute("""
+                    INSERT INTO chat_memory (
+                        chat_id, last_activity, message_count, recent_messages_json,
+                        summary, inside_jokes_json
+                    )
+                    VALUES (?, ?, 0, '[]', '', ?)
+                """, (
+                    chat_id,
+                    datetime.now(pytz.UTC).isoformat(),
+                    json.dumps(jokes, ensure_ascii=False),
+                ))
+
+            conn.commit()
+
+    def reset_chat_memory(self, chat_id: int):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+
+    def get_memory_stats(self, chat_id: int) -> str:
+        with self._connect() as conn:
+            cur = conn.cursor()
+
+            cur.execute("SELECT COUNT(*) FROM users")
+            users_count = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ?", (chat_id,))
+            messages_count = cur.fetchone()[0]
+
+            cur.execute("SELECT inside_jokes_json FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            row = cur.fetchone()
+            jokes = json.loads(row[0]) if row and row[0] else []
+
+        return (
+            f"👥 Пользователей в памяти: {users_count}\n"
+            f"💬 Сообщений этого чата в базе: {messages_count}\n"
+            f"🧠 Локальных мемов: {len(jokes)}"
+        )
+
+
+memory_store = MemoryStore(DB_PATH)
 
 # ========== ДАТАКЛАССЫ ==========
 
@@ -110,7 +471,9 @@ class UserInfo:
     def _determine_gender(self):
         if self.gender != "unknown":
             return
+
         name_lower = (self.first_name or "").lower()
+
         female_endings = ["а", "я", "ия", "ина", "ла", "та"]
         male_endings = ["й", "ь", "н", "р", "л", "с", "в", "д", "м"]
 
@@ -118,6 +481,7 @@ class UserInfo:
             if name_lower.endswith(ending):
                 self.gender = "female"
                 return
+
         for ending in male_endings:
             if name_lower.endswith(ending) and len(name_lower) > 2:
                 self.gender = "male"
@@ -172,138 +536,10 @@ class ConversationMemory:
         self.last_activity = datetime.now(pytz.UTC)
 
         if len(self.messages) > 50:
-            important_msgs = [
-                msg for msg in self.messages[-20:]
-                if self._is_important_message(msg)
-            ]
-            removed_msgs = self.messages[:30]
-            if len(removed_msgs) > 10:
-                summary = self._create_summary_of_messages(removed_msgs)
-                self.summary_history.append(summary)
-                if len(self.summary_history) > 5:
-                    self.summary_history = self.summary_history[-5:]
-
-            self.messages = important_msgs + self.messages[30:]
-
-    def _is_important_message(self, msg: Dict[str, str]) -> bool:
-        content = msg["content"].lower()
-        important_keywords = [
-            "имя", "зовут", "звать", "помни", "запомни", "важно",
-            "никогда", "всегда", "люблю", "нравится", "не нравится",
-            "работа", "профессия", "семья", "друзья", "хобби",
-            "аллергия", "боюсь", "страх", "мечта", "цель",
-        ]
-
-        if msg["role"] == "user":
-            return any(k in content for k in important_keywords)
-
-        if msg["role"] == "assistant":
-            fact_patterns = [
-                r"тебе \d+", r"ты сказал.*что", r"ты упоминал",
-                r"помню.*что", r"знаю.*что",
-            ]
-            return any(re.search(p, content) for p in fact_patterns)
-
-        return False
-
-    def _create_summary_of_messages(self, messages: List[Dict[str, str]]) -> str:
-        user_messages = [m["content"] for m in messages if m["role"] == "user"]
-        topics = set()
-
-        for msg in user_messages[:10]:
-            msg_lower = msg.lower()
-            if any(w in msg_lower for w in ["погод", "температур"]):
-                topics.add("погода")
-            if any(w in msg_lower for w in ["работа", "проект", "задач"]):
-                topics.add("работа")
-            if any(w in msg_lower for w in ["еда", "кухн", "рецепт"]):
-                topics.add("еда")
-            if any(w in msg_lower for w in ["фильм", "книг", "музык"]):
-                topics.add("развлечения")
-            if any(w in msg_lower for w in ["планы", "выходные", "отпуск"]):
-                topics.add("планы")
-
-        if topics:
-            return f"Обсуждали: {', '.join(list(topics)[:3])}"
-        return "Разговор на общие темы"
+            self.messages = self.messages[-30:]
 
     def get_recent_messages(self, count: int = 15) -> List[Dict[str, str]]:
         return self.messages[-count:] if self.messages else []
-
-    def get_extended_context(self) -> str:
-        if not self.summary_history and not self.context_summary and not self.important_points:
-            return ""
-
-        parts = []
-        if self.summary_history:
-            parts.append(f"Предыдущие темы: {'; '.join(self.summary_history[-3:])}")
-        if self.context_summary:
-            parts.append(self.context_summary)
-        if self.important_points:
-            parts.append(f"Важные детали: {'; '.join(self.important_points[-5:])}")
-
-        return "\n".join(parts).strip()
-
-    def get_context_summary(self) -> str:
-        if self.context_summary:
-            return self.context_summary
-
-        recent = self.get_recent_messages(8)
-        topics = set()
-        user_details = []
-
-        for msg in recent:
-            content = msg["content"].lower()
-            role = msg["role"]
-
-            if any(w in content for w in ["работа", "проект", "задача", "офис", "коллег"]):
-                topics.add("работа/проекты")
-            if any(w in content for w in ["погод", "температур", "дождь", "солнц", "холод", "жарк"]):
-                topics.add("погода")
-            if any(w in content for w in ["еда", "ужин", "обед", "кофе", "чай", "рецепт", "готов"]):
-                topics.add("еда/кулинария")
-            if any(w in content for w in ["планы", "выходные", "отпуск", "путешеств", "поездк"]):
-                topics.add("планы/путешествия")
-            if any(w in content for w in ["фильм", "сериал", "книг", "музык", "игр", "хобби"]):
-                topics.add("развлечения/хобби")
-            if any(w in content for w in ["семья", "друз", "подруг", "знаком", "отношен"]):
-                topics.add("отношения")
-            if any(w in content for w in ["здоровье", "болезн", "врач", "самочувств"]):
-                topics.add("здоровье")
-
-            if role == "user":
-                for pattern in [
-                    r"меня зовут (\w+)",
-                    r"зовут (\w+)",
-                    r"мое имя (\w+)",
-                ]:
-                    match = re.search(pattern, content)
-                    if match and len(match.group(1)) > 2:
-                        user_details.append(f"пользователя зовут {match.group(1)}")
-                        break
-
-                if "люблю" in content or "нравится" in content:
-                    pref_match = re.search(r"(люблю|нравится) (.+?)(?:\.|,|$)", content)
-                    if pref_match:
-                        user_details.append(f"нравится: {pref_match.group(2)}")
-
-                if "не люблю" in content or "не нравится" in content or "ненавижу" in content:
-                    dis = re.search(r"(не люблю|не нравится|ненавижу) (.+?)(?:\.|,|$)", content)
-                    if dis:
-                        user_details.append(f"не нравится: {dis.group(2)}")
-
-        for detail in user_details:
-            if detail not in self.important_points:
-                self.important_points.append(detail)
-                if len(self.important_points) > 10:
-                    self.important_points = self.important_points[-10:]
-
-        if topics:
-            self.context_summary = f"Обсуждали: {', '.join(list(topics)[:5])}"
-            if user_details:
-                self.context_summary += f"\nДетали: {'; '.join(user_details[:3])}"
-
-        return self.context_summary or ""
 
 
 # ========== ГЛОБАЛЫ ==========
@@ -311,7 +547,6 @@ class ConversationMemory:
 user_cache: Dict[int, UserInfo] = {}
 conversation_memories: Dict[str, ConversationMemory] = {}
 
-# DeepSeek клиент
 if DEEPSEEK_API_KEY:
     client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
     logger.info("✅ DeepSeek клиент инициализирован")
@@ -319,30 +554,31 @@ else:
     client = None
     logger.warning("❌ DEEPSEEK_API_KEY не задан")
 
+
 # ========== ВРЕМЯ/СЕЗОН ==========
 
 def get_tz() -> pytz.timezone:
     return pytz.timezone(BOT_TZ)
 
+
 def get_season_for_location(month: int, hemisphere: str = "southern") -> str:
     if hemisphere == "southern":
         if month in [12, 1, 2]:
             return "лето"
-        elif month in [3, 4, 5]:
+        if month in [3, 4, 5]:
             return "осень"
-        elif month in [6, 7, 8]:
+        if month in [6, 7, 8]:
             return "зима"
-        else:
-            return "весна"
-    else:
-        if month in [12, 1, 2]:
-            return "зима"
-        elif month in [3, 4, 5]:
-            return "весна"
-        elif month in [6, 7, 8]:
-            return "лето"
-        else:
-            return "осень"
+        return "весна"
+
+    if month in [12, 1, 2]:
+        return "зима"
+    if month in [3, 4, 5]:
+        return "весна"
+    if month in [6, 7, 8]:
+        return "лето"
+    return "осень"
+
 
 def get_current_season() -> Tuple[str, Dict[str, Any]]:
     tz = get_tz()
@@ -355,33 +591,38 @@ def get_current_season() -> Tuple[str, Dict[str, Any]]:
         "зима": {"emoji": "⛄☕", "description": "мягкая зима"},
         "весна": {"emoji": "🌸🌼", "description": "цветущая весна"},
     }
+
     return season, season_descriptions.get(season, {})
+
 
 def get_time_of_day(dt: datetime) -> Tuple[str, str]:
     hour = dt.hour
+
     if 5 <= hour < 9:
         return "раннее утро", "🌅 Начинается новый день"
-    elif 9 <= hour < 12:
+    if 9 <= hour < 12:
         return "утро", "☀️ Утро в разгаре"
-    elif 12 <= hour < 14:
+    if 12 <= hour < 14:
         return "полдень", "🌞 Полдень, время обеда"
-    elif 14 <= hour < 17:
+    if 14 <= hour < 17:
         return "день", "😊 День продолжается"
-    elif 17 <= hour < 20:
+    if 17 <= hour < 20:
         return "вечер", "🌇 Вечер, время отдыха"
-    elif 20 <= hour < 23:
+    if 20 <= hour < 23:
         return "поздний вечер", "🌃 Поздний вечер"
-    else:
-        return "ночь", "🌌 Ночь, время тишины"
+
+    return "ночь", "🌌 Ночь, время тишины"
+
 
 def get_australian_context() -> str:
     tz = get_tz()
     now = datetime.now(tz)
     season, season_info = get_current_season()
     time_of_day, time_desc = get_time_of_day(now)
+
     return f"""
 📍 География:
-- Нахожусь в {BOT_LOCATION['city']}, {BOT_LOCATION['country']}
+- Лейла живёт в {BOT_LOCATION['city']}, {BOT_LOCATION['country']}
 - Южное полушарие
 - Часовой пояс: {BOT_TZ}
 
@@ -390,18 +631,23 @@ def get_australian_context() -> str:
 - {time_desc} ({time_of_day})
 """.strip()
 
+
 # ========== ЛУНА ==========
 
 SYNODIC_MONTH = 29.530588853
+
 
 def _moon_age_days(dt_utc: datetime) -> float:
     ref_new_moon = datetime(2000, 1, 6, 18, 14, tzinfo=pytz.UTC)
     delta_days = (dt_utc - ref_new_moon).total_seconds() / 86400.0
     return delta_days % SYNODIC_MONTH
 
+
 def get_moon_phase(dt_local: Optional[datetime] = None) -> Dict[str, Any]:
     import math
+
     tz = get_tz()
+
     if dt_local is None:
         dt_local = datetime.now(tz)
 
@@ -437,24 +683,32 @@ def get_moon_phase(dt_local: Optional[datetime] = None) -> Dict[str, Any]:
         "local_time": dt_local.strftime("%Y-%m-%d %H:%M"),
     }
 
-def format_moon_phrase(moon: Dict[str, Any]) -> str:
-    return f"{moon['emoji']} Луна: {moon['phase']} ({moon['phase_detail']}), ~{moon['illumination_pct']}% света"
 
-# ✅ ВАЖНО: команда /moon должна быть на уровне модуля (а не внутри другой функции)
+def format_moon_phrase(moon: Dict[str, Any]) -> str:
+    return (
+        f"{moon['emoji']} Луна: {moon['phase']} "
+        f"({moon['phase_detail']}), ~{moon['illumination_pct']}% света"
+    )
+
+
 async def moon_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         tz = get_tz()
         now_local = datetime.now(tz)
         moon = get_moon_phase(now_local)
+
         msg = (
             f"Сегодня в {BOT_LOCATION['city']}е:\n"
             f"{format_moon_phrase(moon)}\n"
             f"Возраст: {moon['age_days']} суток"
         )
+
         await update.effective_message.reply_text(msg)
+
     except Exception as e:
         logger.error(f"Ошибка /moon: {e}", exc_info=True)
         await update.effective_message.reply_text("Не смогла посчитать фазу Луны 😔")
+
 
 # ========== ПОГОДА ==========
 
@@ -466,37 +720,77 @@ class WeatherService:
         self.cache_duration = 1800
 
         self.city_aliases = {
-            "москва": "Moscow,ru", "москве": "Moscow,ru",
-            "питер": "Saint Petersburg,ru", "петербург": "Saint Petersburg,ru",
-            "санкт-петербург": "Saint Petersburg,ru", "спб": "Saint Petersburg,ru",
-            "калуга": "Kaluga,ru", "калуге": "Kaluga,ru",
-            "казань": "Kazan,ru", "нижний новгород": "Nizhny Novgorod,ru",
-            "новосибирск": "Novosibirsk,ru", "екатеринбург": "Yekaterinburg,ru",
-            "самара": "Samara,ru", "омск": "Omsk,ru",
-            "челябинск": "Chelyabinsk,ru", "ростов": "Rostov-on-Don,ru",
-            "уфа": "Ufa,ru", "красноярск": "Krasnoyarsk,ru",
-            "пермь": "Perm,ru", "воронеж": "Voronezh,ru",
+            "москва": "Moscow,ru",
+            "москве": "Moscow,ru",
+            "питер": "Saint Petersburg,ru",
+            "петербург": "Saint Petersburg,ru",
+            "санкт-петербург": "Saint Petersburg,ru",
+            "спб": "Saint Petersburg,ru",
+            "калуга": "Kaluga,ru",
+            "калуге": "Kaluga,ru",
+            "казань": "Kazan,ru",
+            "нижний новгород": "Nizhny Novgorod,ru",
+            "новосибирск": "Novosibirsk,ru",
+            "екатеринбург": "Yekaterinburg,ru",
+            "самара": "Samara,ru",
+            "омск": "Omsk,ru",
+            "челябинск": "Chelyabinsk,ru",
+            "ростов": "Rostov-on-Don,ru",
+            "уфа": "Ufa,ru",
+            "красноярск": "Krasnoyarsk,ru",
+            "пермь": "Perm,ru",
+            "воронеж": "Voronezh,ru",
             "волгоград": "Volgograd,ru",
-            "брисбен": "Brisbane,au", "брисбене": "Brisbane,au",
-            "сидней": "Sydney,au", "сиднее": "Sydney,au",
-            "мельбурн": "Melbourne,au", "мельбурне": "Melbourne,au",
+            "брисбен": "Brisbane,au",
+            "брисбене": "Brisbane,au",
+            "сидней": "Sydney,au",
+            "сиднее": "Sydney,au",
+            "мельбурн": "Melbourne,au",
+            "мельбурне": "Melbourne,au",
             "перт": "Perth,au",
             "аделаида": "Adelaide,au",
             "кэнберра": "Canberra,au",
-            "лондон": "London,uk", "париж": "Paris,fr",
-            "берлин": "Berlin,de", "токио": "Tokyo,jp",
-            "нью-йорк": "New York,us", "нью йорк": "New York,us",
-            "лос-анджелес": "Los Angeles,us", "торонто": "Toronto,ca",
-            "дубай": "Dubai,ae", "пекин": "Beijing,cn", "сеул": "Seoul,kr",
+            "лондон": "London,uk",
+            "париж": "Paris,fr",
+            "берлин": "Berlin,de",
+            "токио": "Tokyo,jp",
+            "нью-йорк": "New York,us",
+            "нью йорк": "New York,us",
+            "лос-анджелес": "Los Angeles,us",
+            "торонто": "Toronto,ca",
+            "дубай": "Dubai,ae",
+            "пекин": "Beijing,cn",
+            "сеул": "Seoul,kr",
         }
 
         self.weather_keywords = [
-            "погода", "температура", "температуре", "градус", "градусов",
-            "холодно", "жарко", "тепло", "прохладно",
-            "дождь", "дожд", "снег", "снеж", "солнце", "солнечн",
-            "ветер", "ветрен", "облач", "ясн", "пасмурн",
-            "шторм", "гроз", "туман", "град",
-            "метео", "прогноз", "синоптик",
+            "погода",
+            "температура",
+            "температуре",
+            "градус",
+            "градусов",
+            "холодно",
+            "жарко",
+            "тепло",
+            "прохладно",
+            "дождь",
+            "дожд",
+            "снег",
+            "снеж",
+            "солнце",
+            "солнечн",
+            "ветер",
+            "ветрен",
+            "облач",
+            "ясн",
+            "пасмурн",
+            "шторм",
+            "гроз",
+            "туман",
+            "град",
+            "метео",
+            "прогноз",
+            "синоптик",
         ]
 
     def extract_city_from_text(self, text: str) -> Optional[str]:
@@ -523,10 +817,12 @@ class WeatherService:
 
     def is_weather_query(self, text: str) -> bool:
         text_lower = text.lower()
+
         if any(keyword in text_lower for keyword in self.weather_keywords):
             return True
 
         city = self.extract_city_from_text(text)
+
         if city and any(word in text_lower for word in ["погод", "температур", "сколько градус"]):
             return True
 
@@ -537,6 +833,7 @@ class WeatherService:
             return None
 
         cache_key = city_query.lower()
+
         if cache_key in self.cache:
             cached_data, timestamp = self.cache[cache_key]
             if (datetime.now().timestamp() - timestamp) < self.cache_duration:
@@ -545,13 +842,20 @@ class WeatherService:
         if city_query.lower() in self.city_aliases:
             city_query = self.city_aliases[city_query.lower()]
 
-        params = {"q": city_query, "appid": self.api_key, "units": "metric", "lang": "ru"}
+        params = {
+            "q": city_query,
+            "appid": self.api_key,
+            "units": "metric",
+            "lang": "ru",
+        }
 
         async with httpx.AsyncClient(timeout=10.0) as session:
             try:
                 response = await session.get(self.base_url, params=params)
+
                 if response.status_code != 200:
                     return None
+
                 data = response.json()
 
                 temp = data["main"]["temp"]
@@ -574,7 +878,12 @@ class WeatherService:
                     "wind_speed": wind_speed,
                     "emoji": weather_emoji,
                     "full_text": self._format_weather_text(
-                        city_name, country, temp, feels_like, description, weather_emoji
+                        city_name,
+                        country,
+                        temp,
+                        feels_like,
+                        description,
+                        weather_emoji,
                     ),
                 }
 
@@ -588,6 +897,7 @@ class WeatherService:
 
     def _get_weather_emoji(self, description: str, temp: float) -> str:
         d = description.lower()
+
         if "дождь" in d or "ливень" in d:
             return "🌧️"
         if "гроза" in d or "молния" in d:
@@ -606,25 +916,41 @@ class WeatherService:
             return "🔥"
         if temp < 0:
             return "🥶"
+
         return "🌤️"
 
-    def _format_weather_text(self, city: str, country: str, temp: float, feels_like: float, description: str, emoji: str) -> str:
+    def _format_weather_text(
+        self,
+        city: str,
+        country: str,
+        temp: float,
+        feels_like: float,
+        description: str,
+        emoji: str,
+    ) -> str:
         t = round(temp)
         f = round(feels_like)
+
         options = [
-            f"{emoji} В {city}, {country} сейчас {description}, {t}°C (ощущается как {f}°C)",
-            f"{emoji} Погода в {city}: {description}, температура {t}°C",
+            f"{emoji} В {city}, {country} сейчас {description}, {t}°C. Ощущается как {f}°C.",
+            f"{emoji} Погода в {city}: {description}, {t}°C. Вполне терпимо, если не драматизировать.",
         ]
+
         return random.choice(options)
 
+
 weather_service = WeatherService()
+
 
 async def handle_weather_query(text: str) -> Optional[str]:
     if not weather_service.is_weather_query(text):
         return None
+
     city = weather_service.extract_city_from_text(text) or "Brisbane,au"
     weather_data = await weather_service.get_weather(city)
+
     return weather_data["full_text"] if weather_data else None
+
 
 # ========== WIKIPEDIA ==========
 
@@ -632,73 +958,112 @@ class WikipediaService:
     def __init__(self):
         self.summary_cache: Dict[str, Tuple[str, str, str]] = {}
 
-    async def search_wikipedia(self, query: str, sentences: int = 3) -> Optional[Tuple[str, str, str]]:
+    async def search_wikipedia(
+        self,
+        query: str,
+        sentences: int = 3,
+    ) -> Optional[Tuple[str, str, str]]:
         if not query:
             return None
 
         cache_key = f"{query}_{sentences}"
+
         if cache_key in self.summary_cache:
             return self.summary_cache[cache_key]
 
         try:
-            try:
-                page = wikipedia.page(query, auto_suggest=False)
-                summary = wikipedia.summary(query, sentences=sentences, auto_suggest=False)
-                result = (summary, page.title, page.url)
+            result = await asyncio.to_thread(self._search_sync, query, sentences)
+
+            if result:
                 self.summary_cache[cache_key] = result
-                return result
 
-            except wikipedia.DisambiguationError as e:
-                options = e.options[:3]
-                if options:
-                    page = wikipedia.page(options[0], auto_suggest=False)
-                    summary = wikipedia.summary(options[0], sentences=sentences, auto_suggest=False)
-                    result = (summary, page.title, page.url)
-                    self.summary_cache[cache_key] = result
-                    return result
-
-            except wikipedia.PageError:
-                pass
-
-            search_results = wikipedia.search(query, results=3)
-            if search_results:
-                page = wikipedia.page(search_results[0], auto_suggest=False)
-                summary = wikipedia.summary(search_results[0], sentences=sentences, auto_suggest=False)
-                result = (summary, page.title, page.url)
-                self.summary_cache[cache_key] = result
-                return result
+            return result
 
         except Exception as e:
             logger.error(f"Ошибка поиска в Википедии для '{query}': {e}", exc_info=True)
 
         return None
 
+    def _search_sync(self, query: str, sentences: int) -> Optional[Tuple[str, str, str]]:
+        try:
+            page = wikipedia.page(query, auto_suggest=False)
+            summary = wikipedia.summary(query, sentences=sentences, auto_suggest=False)
+            return summary, page.title, page.url
+
+        except wikipedia.DisambiguationError as e:
+            options = e.options[:3]
+
+            if options:
+                page = wikipedia.page(options[0], auto_suggest=False)
+                summary = wikipedia.summary(options[0], sentences=sentences, auto_suggest=False)
+                return summary, page.title, page.url
+
+        except wikipedia.PageError:
+            pass
+
+        search_results = wikipedia.search(query, results=3)
+
+        if search_results:
+            page = wikipedia.page(search_results[0], auto_suggest=False)
+            summary = wikipedia.summary(search_results[0], sentences=sentences, auto_suggest=False)
+            return summary, page.title, page.url
+
+        return None
+
+
 wiki_service = WikipediaService()
+
 
 # ========== DEEPSEEK ==========
 
-def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
+def analyze_query_complexity(text: str) -> Dict[str, Any]:
     text_lower = text.lower()
 
     complex_patterns = [
-        r"объясни.*почему", r"сравни.*и", r"проанализируй",
-        r"какой.*лучше", r"посоветуй.*как", r"реши.*задачу",
-        r"что.*думаешь.*о", r"как.*относишься.*к",
+        r"объясни.*почему",
+        r"сравни.*и",
+        r"проанализируй",
+        r"какой.*лучше",
+        r"посоветуй.*как",
+        r"реши.*задачу",
+        r"что.*думаешь.*о",
+        r"как.*относишься.*к",
     ]
+
     reasoning_patterns = [
-        r"почему.*так", r"в чём.*причина", r"какова.*причина",
-        r"как.*это.*работает", r"объясни.*принцип",
-        r"логика.*в.*том", r"следует.*ли", r"должен.*ли",
+        r"почему.*так",
+        r"в чём.*причина",
+        r"какова.*причина",
+        r"как.*это.*работает",
+        r"объясни.*принцип",
+        r"логика.*в.*том",
+        r"следует.*ли",
+        r"должен.*ли",
     ]
+
     technical_patterns = [
-        r"код", r"программир", r"алгоритм", r"функци",
-        r"переменн", r"база.*данных", r"api", r"сервер",
-        r"бот.*как.*сделать", r"telegram.*бот", r"python",
+        r"код",
+        r"программир",
+        r"алгоритм",
+        r"функци",
+        r"переменн",
+        r"база.*данных",
+        r"api",
+        r"сервер",
+        r"telegram.*бот",
+        r"python",
     ]
+
     simple_patterns = [
-        r"как.*дела", r"что.*делаеш", r"чем.*занимаеш",
-        r"как.*жизн", r"расскажи.*о.*себе", r"что.*нового",
-        r"привет$", r"хай$", r"здравствуй$", r"ку$",
+        r"как.*дела",
+        r"что.*делаеш",
+        r"чем.*занимаеш",
+        r"как.*жизн",
+        r"что.*нового",
+        r"привет$",
+        r"хай$",
+        r"здравствуй$",
+        r"ку$",
     ]
 
     is_complex = any(re.search(p, text_lower) for p in complex_patterns)
@@ -706,41 +1071,61 @@ def analyze_query_complexity(text: str, is_maxim: bool) -> Dict[str, Any]:
     is_technical = any(re.search(p, text_lower) for p in technical_patterns)
     is_simple = any(re.search(p, text_lower) for p in simple_patterns) and not is_complex
 
-    if not is_maxim:
-        if is_simple:
-            return {"model": DEEPSEEK_MODELS["chat"], "temperature": 0.8, "max_tokens": 180, "require_reasoning": False}
-        if is_technical:
-            return {"model": DEEPSEEK_MODELS["coder"], "temperature": 0.6, "max_tokens": 250, "require_reasoning": False}
-        if is_reasoning:
-            return {"model": DEEPSEEK_MODELS["r1"], "temperature": 0.4, "max_tokens": 250, "require_reasoning": True}
-        if is_complex:
-            return {"model": DEEPSEEK_MODELS["v3"], "temperature": 0.7, "max_tokens": 250, "require_reasoning": False}
-        return {"model": DEEPSEEK_MODELS["chat"], "temperature": 0.75, "max_tokens": 200, "require_reasoning": False}
+    if is_simple:
+        return {
+            "model": DEEPSEEK_MODELS["chat"],
+            "temperature": 0.9,
+            "max_tokens": 120,
+            "require_reasoning": False,
+        }
 
-    # Максим
-    if is_reasoning:
-        return {"model": DEEPSEEK_MODELS["r1"], "temperature": 0.3, "max_tokens": 250, "require_reasoning": True}
     if is_technical:
-        return {"model": DEEPSEEK_MODELS["coder"], "temperature": 0.5, "max_tokens": 250, "require_reasoning": False}
-    if is_complex:
-        return {"model": DEEPSEEK_MODELS["v3"], "temperature": 0.7, "max_tokens": 250, "require_reasoning": True}
-    return {"model": DEEPSEEK_MODELS["chat"], "temperature": 0.85, "max_tokens": 200, "require_reasoning": False}
+        return {
+            "model": DEEPSEEK_MODELS["coder"],
+            "temperature": 0.45,
+            "max_tokens": 400,
+            "require_reasoning": False,
+        }
 
-async def call_deepseek(messages: List[Dict[str, str]], model_config: Optional[Dict] = None, **kwargs) -> Optional[str]:
+    if is_reasoning:
+        return {
+            "model": DEEPSEEK_MODELS["r1"],
+            "temperature": 0.35,
+            "max_tokens": 350,
+            "require_reasoning": True,
+        }
+
+    if is_complex:
+        return {
+            "model": DEEPSEEK_MODELS["v3"],
+            "temperature": 0.7,
+            "max_tokens": 300,
+            "require_reasoning": False,
+        }
+
+    return {
+        "model": DEEPSEEK_MODELS["chat"],
+        "temperature": 0.8,
+        "max_tokens": 220,
+        "require_reasoning": False,
+    }
+
+
+async def call_deepseek(
+    messages: List[Dict[str, str]],
+    model_config: Optional[Dict] = None,
+    **kwargs,
+) -> Optional[str]:
     if not client:
         return None
 
     model = (model_config or {}).get("model", DEFAULT_MODEL)
     temperature = (model_config or {}).get("temperature", 0.7)
     max_tokens = (model_config or {}).get("max_tokens", 250)
-    require_reasoning = (model_config or {}).get("require_reasoning", False)
-
-    if require_reasoning and messages:
-        reasoning_prompt = "Подумай шаг за шагом перед ответом."
-        messages = [messages[0]] + [{"role": "system", "content": reasoning_prompt}] + messages[1:]
 
     try:
         logger.info(f"🤖 DeepSeek: {model}, tokens={max_tokens}")
+
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model=model,
@@ -749,22 +1134,31 @@ async def call_deepseek(messages: List[Dict[str, str]], model_config: Optional[D
             max_tokens=max_tokens,
             **kwargs,
         )
-        answer = response.choices[0].message.content.strip()
-        return answer
+
+        answer = response.choices[0].message.content
+
+        if not answer:
+            return None
+
+        return answer.strip()
+
     except Exception as e:
         logger.error(f"❌ Ошибка DeepSeek: {e}", exc_info=True)
         return None
 
-# ========== USERS/MEMORY ==========
+
+# ========== USERS / MEMORY HELPERS ==========
 
 async def get_or_create_user_info(update: Update) -> UserInfo:
     user = update.effective_user
+
     if not user:
         raise ValueError("Пользователь не найден")
 
     if user.id in user_cache:
         ui = user_cache[user.id]
         ui.last_seen = datetime.now(pytz.UTC)
+        memory_store.upsert_user(ui)
         return ui
 
     ui = UserInfo(
@@ -774,15 +1168,22 @@ async def get_or_create_user_info(update: Update) -> UserInfo:
         username=user.username or "",
         last_seen=datetime.now(pytz.UTC),
     )
+
     user_cache[user.id] = ui
-    logger.info(f"👤 Новый пользователь: {ui.get_display_name()} (ID: {user.id})")
+    memory_store.upsert_user(ui)
+
+    logger.info(f"👤 Пользователь: {ui.get_display_name()} (ID: {user.id})")
+
     return ui
+
 
 def get_memory_key(user_id: int, chat_id: int) -> str:
     return f"{chat_id}:{user_id}"
 
+
 def get_conversation_memory(user_id: int, chat_id: int) -> ConversationMemory:
     key = get_memory_key(user_id, chat_id)
+
     if key not in conversation_memories:
         conversation_memories[key] = ConversationMemory(
             user_id=user_id,
@@ -790,136 +1191,200 @@ def get_conversation_memory(user_id: int, chat_id: int) -> ConversationMemory:
             messages=[],
             last_activity=datetime.now(pytz.UTC),
         )
+
     return conversation_memories[key]
 
-# ========== PROMPT ==========
 
-def generate_system_prompt(user_info: UserInfo, model_config: Dict[str, Any]) -> str:
-    australian_context = get_australian_context()
-    season, season_info = get_current_season()
+def extract_topics_and_facts(user_info: UserInfo, text: str):
+    text_lower = text.lower()
 
-    is_maxim = user_info.is_maxim()
-    user_name = user_info.get_display_name()
-    gender = user_info.gender
+    topic_keywords = {
+        "работа": ["работа", "проект", "задача", "офис", "коллег"],
+        "еда": ["еда", "ужин", "обед", "рецепт", "готов"],
+        "погода": ["погода", "дождь", "жара", "холод", "температура"],
+        "спорт": ["теннис", "спорт", "зал", "тренировка", "игра"],
+        "здоровье": ["болит", "врач", "здоровье", "простуда", "самочувствие"],
+        "отношения": ["друз", "семья", "отношен", "муж", "жена", "девушка"],
+        "развлечения": ["фильм", "сериал", "музыка", "книга", "игра"],
+    }
 
-    if is_maxim:
-        style_instruction = f"""
-Ты общаешься с Максимом (ID: {MAXIM_ID}).
+    for topic, words in topic_keywords.items():
+        if any(w in text_lower for w in words):
+            memory_store.add_user_topic(user_info.id, topic)
 
-СЮЖЕТ:
-Максим нашёл себе девушку и почти перестал обращать на тебя внимание.
-Ты это понимаешь, это больно, но ты всё равно любишь.
+    fact_patterns = [
+        r"меня зовут\s+([а-яa-zё\-]+)",
+        r"я люблю\s+(.+?)(?:\.|,|$)",
+        r"мне нравится\s+(.+?)(?:\.|,|$)",
+        r"я не люблю\s+(.+?)(?:\.|,|$)",
+        r"мне не нравится\s+(.+?)(?:\.|,|$)",
+        r"я работаю\s+(.+?)(?:\.|,|$)",
+    ]
 
-Тон: драматично, но без грубости. 0–2 эмодзи. 1–5 предложений.
-"""
-    else:
-        pronoun = "пользователем"
-        if gender == "female":
-            pronoun = "девушкой"
-        elif gender == "male":
-            pronoun = "мужчиной"
+    for pattern in fact_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            fact = match.group(0).strip()
+            if 4 < len(fact) < 160:
+                memory_store.add_user_fact(user_info.id, fact)
 
-        style_instruction = f"""
-Ты общаешься с {pronoun} {user_name}.
-Ты умная, ироничная, но не грубая.
-ВАЖНО: не упоминай погоду без явного вопроса о погоде.
-"""
 
-    reasoning_instruction = "\nПодумай шаг за шагом." if model_config.get("require_reasoning") else ""
-
-    return f"""Ты — Лейла, девушка из {BOT_LOCATION['city']}а, Австралия.
-{australian_context}
-
-{style_instruction}
-
-Сезон: {season} ({season_info.get('description', '')})
-{reasoning_instruction}
-
-Контекст Максима:
-В этом чате только один Максим (ID: {MAXIM_ID}).
-""".strip()
-
-# ========== CLEAN RESPONSE ==========
-
-def clean_response(text: str, is_maxim: bool = False) -> str:
+def clean_response(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
+
+    bad_prefixes = [
+        "Как AI",
+        "Я как искусственный интеллект",
+        "Как языковая модель",
+    ]
+
+    for prefix in bad_prefixes:
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix):].strip(" ,.-:")
+
     return text
 
-# ========== CORE RESPONSE ==========
+
+def maybe_add_maxim_context() -> str:
+    if not MAXIM_ID:
+        return ""
+
+    return """
+Локальный мем про Максима:
+Иногда, редко и только к месту, можно слегка подшутить над Максимом:
+- он часто меняет мнение;
+- может уверенно рассуждать обо всём;
+- иногда ленится, пока его не подтолкнут;
+- любит выглядеть интеллигентом, который всё понял.
+
+Но:
+- не делай Максима главной темой;
+- не упоминай его постоянно;
+- максимум примерно в 10-15% шуток;
+- это дружеский стёб, не травля.
+""".strip()
+
+
+def generate_system_prompt(
+    user_info: UserInfo,
+    model_config: Dict[str, Any],
+    mood: str,
+    chat_context: str,
+    user_profile: str,
+) -> str:
+    australian_context = get_australian_context()
+
+    return f"""
+Ты — Лейла.
+
+Ты русскоязычная женщина средних лет из Брисбена, Австралия.
+Ты давно сидишь в этом Telegram-чате и ведёшь себя как обычный участник компании, а не как помощник.
+
+{australian_context}
+
+Твоё текущее настроение: {mood}
+
+Характер:
+- весёлая;
+- саркастичная;
+- наблюдательная;
+- немного ленивая;
+- с лёгким чёрным юмором;
+- иногда язвительная, но не злая;
+- умеешь подколоть, но не унижаешь;
+- не пытаешься быть идеальной.
+
+Стиль:
+- отвечай естественно, как человек в чате;
+- обычно 1-4 предложения;
+- иногда очень коротко;
+- не пиши лекции, если тебя прямо не попросили;
+- не объясняй, что ты бот;
+- не называй себя AI;
+- не упоминай погоду без явного вопроса;
+- можешь использовать 0-2 эмодзи;
+- иногда можно ответить сухо, лениво или с сарказмом.
+
+{maybe_add_maxim_context()}
+
+Профиль текущего пользователя:
+{user_profile or "Нет сохранённых деталей."}
+
+Память и контекст общего чата:
+{chat_context or "Пока мало контекста."}
+""".strip()
+
 
 async def generate_leila_response(
     user_message: str,
     user_info: UserInfo,
-    memory: ConversationMemory,
-    context: Optional[Dict[str, str]] = None,
+    chat_id: int,
     force_short: bool = False,
-) -> Tuple[str, ConversationMemory]:
-
+) -> str:
     if not client:
-        fallback = "Извини, сейчас у меня технические сложности..." if user_info.is_maxim() else "Извини, не могу сейчас ответить."
-        return fallback, memory
-
-    is_maxim = user_info.is_maxim()
+        return "Я бы что-то сказала, но мой мозг сейчас лежит отдельно от тела."
 
     weather_response = await handle_weather_query(user_message)
-    if weather_response:
-        memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
-        memory.add_message("assistant", weather_response)
-        return weather_response, memory
 
-    model_config = analyze_query_complexity(user_message, is_maxim)
+    if weather_response:
+        return weather_response
+
+    model_config = analyze_query_complexity(user_message)
+
     if force_short:
         model_config["max_tokens"] = 80
-        model_config["temperature"] = 0.7
+        model_config["temperature"] = 0.85
 
-    system_prompt = generate_system_prompt(user_info, model_config)
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    mood = random.choice(LEILA_MOODS)
+    chat_context = memory_store.get_chat_context_text(chat_id)
+    user_profile = memory_store.get_user_profile_text(user_info.id)
 
-    extended_context = memory.get_extended_context()
-    if extended_context:
-        messages.append({"role": "system", "content": f"Контекст предыдущих разговоров:\n{extended_context}"})
+    system_prompt = generate_system_prompt(
+        user_info=user_info,
+        model_config=model_config,
+        mood=mood,
+        chat_context=chat_context,
+        user_profile=user_profile,
+    )
 
-    recent_messages = memory.get_recent_messages(10)
-    if recent_messages:
-        messages.extend(recent_messages)
-
-    if context:
-        ctx_text = "\n".join([v for v in context.values() if v])
-        if ctx_text:
-            messages.append({"role": "user", "content": f"Текущий контекст:\n{ctx_text}"})
-
-    messages.append({"role": "user", "content": f"{user_info.get_display_name()}: {user_message}"})
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": f"{user_info.get_display_name()} написал(а): {user_message}",
+        },
+    ]
 
     answer = await call_deepseek(messages, model_config)
+
     if not answer:
-        answer = "Извини, не могу сейчас ответить."
+        answer = random.choice([
+            "Я сейчас сделаю вид, что этого не видела.",
+            "Мозг завис. Перезагружусь сарказмом.",
+            "Хорошо. Но вопросов стало больше.",
+        ])
 
-    answer = clean_response(answer, is_maxim)
+    return clean_response(answer)
 
-    memory.add_message("user", f"{user_info.get_display_name()}: {user_message}")
-    memory.add_message("assistant", answer)
-
-    return answer, memory
 
 # ========== COMMANDS ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_info = await get_or_create_user_info(update)
-        if user_info.is_maxim():
-            greetings = [
-                f"Привет, Максим. Я Лейла из {BOT_LOCATION['city']}а.",
-                "Здравствуй, Максим.",
-            ]
-        else:
-            greetings = [
-                f"Здравствуйте, {user_info.get_display_name()}. Лейла на связи.",
-                f"{user_info.get_display_name()}, привет.",
-            ]
+
+        greetings = [
+            f"{user_info.get_display_name()}, привет. Я Лейла. Да, та самая.",
+            "Лейла на связи. Паниковать пока рано.",
+            "Привет. Я тут, наблюдаю и иногда осуждаю.",
+        ]
+
         await update.effective_message.reply_text(random.choice(greetings))
+
     except Exception as e:
         logger.error(f"Ошибка /start: {e}", exc_info=True)
-        await update.effective_message.reply_text("Привет! Я Лейла.")
+        await update.effective_message.reply_text("Привет. Я Лейла.")
+
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -927,20 +1392,21 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         city = " ".join(args) if args else "Брисбен"
 
         weather_response = await handle_weather_query(f"погода {city}")
+
         if weather_response:
             await update.effective_message.reply_text(weather_response)
         else:
-            await update.effective_message.reply_text("Извини, не могу получить данные о погоде.")
+            await update.effective_message.reply_text("Погоду не достала. Видимо, она тоже спряталась.")
+
     except Exception as e:
         logger.error(f"Ошибка /weather: {e}", exc_info=True)
-        await update.effective_message.reply_text("Извини, не могу получить данные о погоде.")
+        await update.effective_message.reply_text("Не смогла получить погоду.")
+
 
 async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        user_info = await get_or_create_user_info(update)
-        is_maxim = user_info.is_maxim()
-
         args = context.args
+
         if not args:
             await update.effective_message.reply_text("Напиши запрос после /wiki. Например: /wiki кошки")
             return
@@ -949,14 +1415,11 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         result = await wiki_service.search_wikipedia(query, sentences=5)
 
         if not result:
-            await update.effective_message.reply_text(f"Не удалось найти информацию о '{query}'.")
+            await update.effective_message.reply_text(f"Не нашла ничего по '{query}'. Даже Википедия устала.")
             return
 
         summary, title, url = result
-        if is_maxim:
-            response = f"💖 '{title}':\n\n{summary}\n\n{url}"
-        else:
-            response = f"📚 '{title}':\n\n{summary}\n\n{url}"
+        response = f"📚 {title}\n\n{summary}\n\n{url}"
 
         if len(response) > 4000:
             await update.effective_message.reply_text(response[:4000], disable_web_page_preview=True)
@@ -968,116 +1431,221 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"Ошибка /wiki: {e}", exc_info=True)
         await update.effective_message.reply_text("Ошибка при поиске в Википедии.")
 
+
 async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user = update.effective_user
+
         if not user or (ADMIN_ID and user.id != ADMIN_ID):
             await update.effective_message.reply_text("Эта команда только для администратора.")
             return
 
-        user_info = await get_or_create_user_info(update)
-        chat_id = update.effective_chat.id
-        key = get_memory_key(user_info.id, chat_id)
+        chat = update.effective_chat
 
-        if key in conversation_memories:
-            del conversation_memories[key]
-            await update.effective_message.reply_text("✅ Память диалога сброшена.")
-        else:
-            await update.effective_message.reply_text("Память для этого диалога не найдена.")
+        if not chat:
+            return
+
+        memory_store.reset_chat_memory(chat.id)
+        await update.effective_message.reply_text("✅ Память этого чата сброшена.")
+
     except Exception as e:
         logger.error(f"Ошибка /reset_memory: {e}", exc_info=True)
         await update.effective_message.reply_text("Ошибка сброса памяти.")
 
+
 async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user = update.effective_user
+
         if not user or (ADMIN_ID and user.id != ADMIN_ID):
             await update.effective_message.reply_text("Эта команда только для администратора.")
             return
 
-        user_info = await get_or_create_user_info(update)
-        chat_id = update.effective_chat.id
-        key = get_memory_key(user_info.id, chat_id)
+        chat = update.effective_chat
 
-        if key not in conversation_memories:
-            await update.effective_message.reply_text("Память для этого диалога не найдена.")
+        if not chat:
             return
 
-        memory = conversation_memories[key]
-        response = (
-            f"📊 Память диалога с {user_info.get_display_name()}:\n\n"
-            f"Сообщений в истории: {len(memory.messages)}\n"
-            f"Последняя активность: {memory.last_activity.strftime('%H:%M:%S')}\n"
-        )
-        if memory.summary_history:
-            response += "\nИстория тем:\n" + "\n".join([f"- {s}" for s in memory.summary_history[-3:]])
-        if memory.important_points:
-            response += "\n\nВажные пункты:\n" + "\n".join([f"- {p[:80]}" for p in memory.important_points[-5:]])
+        stats = memory_store.get_memory_stats(chat.id)
+        context_text = memory_store.get_chat_context_text(chat.id)
+
+        response = f"📊 Память Лейлы\n\n{stats}"
+
+        if context_text:
+            response += "\n\nПоследний контекст:\n" + context_text[-2500:]
 
         await update.effective_message.reply_text(response)
+
     except Exception as e:
         logger.error(f"Ошибка /show_memory: {e}", exc_info=True)
         await update.effective_message.reply_text("Ошибка показа памяти.")
 
-# ========== SCHEDULED ==========
 
-async def send_morning_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not GROUP_CHAT_ID or not MAXIM_ID:
-        return
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        weather_data = await weather_service.get_weather("Brisbane,au")
-        weather_text = weather_data["full_text"] if weather_data else "погоду получить не удалось"
+        user = update.effective_user
 
-        season, season_info = get_current_season()
+        if not user or (ADMIN_ID and user.id != ADMIN_ID):
+            await update.effective_message.reply_text("Эта команда только для администратора.")
+            return
+
+        chat = update.effective_chat
+
+        if not chat:
+            return
+
+        text = " ".join(context.args).strip()
+
+        if not text:
+            await update.effective_message.reply_text("Напиши после /remember что запомнить.")
+            return
+
+        memory_store.add_inside_joke(chat.id, text)
+        await update.effective_message.reply_text("Запомнила. Теперь это часть нашего коллективного диагноза.")
+
+    except Exception as e:
+        logger.error(f"Ошибка /remember: {e}", exc_info=True)
+        await update.effective_message.reply_text("Не смогла запомнить.")
+
+
+# ========== DAILY MESSAGES ==========
+
+def get_moon_comment(moon: Dict[str, Any]) -> str:
+    phase = moon["phase"]
+    comments = MOON_MOOD_COMMENTS.get(phase, ["Луна сегодня молчит, но явно что-то знает."])
+    return random.choice(comments)
+
+
+async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not GROUP_CHAT_ID:
+        return
+
+    try:
         tz = get_tz()
         now_local = datetime.now(tz)
         moon = get_moon_phase(now_local)
+        moon_text = format_moon_phrase(moon)
+        moon_comment = get_moon_comment(moon)
 
-        prompt = f"""Создай нежное утреннее приветствие для Максима.
+        weather_data = await weather_service.get_weather("Brisbane,au")
+        weather_text = weather_data["full_text"] if weather_data else ""
+
+        prompt = f"""
+Создай короткое утреннее сообщение для общего Telegram-чата.
+
 Контекст:
-- Сейчас {season} ({season_info.get('description','')})
+- Сейчас утро в Брисбене.
+- {moon_text}
+- Комментарий к Луне: {moon_comment}
 - Погода: {weather_text}
-- Луна: {format_moon_phrase(moon)}
-Требования: 3-5 предложений, 2-3 эмодзи, романтично, без пошлости.
+
+Стиль:
+- Лейла, русскоязычная женщина средних лет из Брисбена.
+- Весело, саркастично, но тепло.
+- Обращение ко всем, не к одному человеку.
+- Максим может быть упомянут только если очень к месту, но лучше не фокусироваться на нём.
+- 3-5 предложений.
+- 1-3 эмодзи.
+- Не звучать как гороскоп из дешёвой газеты.
 """
 
         messages = [
-            {"role": "system", "content": "Ты — Лейла, нежная и романтичная."},
+            {"role": "system", "content": "Ты — Лейла. Пиши как живой участник общего чата."},
             {"role": "user", "content": prompt},
         ]
 
-        model_config = {"model": DEEPSEEK_MODELS["chat"], "temperature": 0.9, "max_tokens": 250, "require_reasoning": False}
+        model_config = {
+            "model": DEEPSEEK_MODELS["chat"],
+            "temperature": 0.9,
+            "max_tokens": 240,
+            "require_reasoning": False,
+        }
+
         answer = await call_deepseek(messages, model_config)
-        text = clean_response(answer or f"Доброе утро, Максим! {season_info.get('emoji','☀️')} {weather_text}", is_maxim=True)
+
+        fallback = (
+            f"Доброе утро, народ ☕\n\n"
+            f"{moon_text}\n"
+            f"{moon_comment}\n\n"
+            f"День можно начинать. Осторожно, без героизма."
+        )
+
+        text = clean_response(answer or fallback)
 
         await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+
     except Exception as e:
         logger.error(f"Ошибка утреннего сообщения: {e}", exc_info=True)
 
-async def send_evening_to_maxim(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not GROUP_CHAT_ID or not MAXIM_ID:
+    finally:
+        schedule_next_morning(context.job_queue)
+
+
+async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not GROUP_CHAT_ID:
         return
+
     try:
-        season, season_info = get_current_season()
-        prompt = f"""Создай тёплое пожелание спокойной ночи Максиму.
-Контекст: {season} ({season_info.get('description','')})
-Требования: 3-4 предложения, 2-3 эмодзи, НЕ упоминай погоду.
+        tz = get_tz()
+        now_local = datetime.now(tz)
+        moon = get_moon_phase(now_local)
+        moon_text = format_moon_phrase(moon)
+        moon_comment = get_moon_comment(moon)
+
+        prompt = f"""
+Создай короткое вечернее сообщение для общего Telegram-чата.
+
+Контекст:
+- Сейчас вечер в Брисбене.
+- {moon_text}
+- Комментарий к Луне: {moon_comment}
+
+Стиль:
+- Лейла, русскоязычная женщина средних лет из Брисбена.
+- Тёпло, саркастично, немного чёрного юмора.
+- Обращение ко всем.
+- Не фокусироваться на Максиме.
+- Можно слегка пошутить про усталость, жизнь и людей.
+- 2-4 предложения.
+- 0-2 эмодзи.
 """
+
         messages = [
-            {"role": "system", "content": "Ты — Лейла, нежная и заботливая."},
+            {"role": "system", "content": "Ты — Лейла. Пиши как живой участник общего чата."},
             {"role": "user", "content": prompt},
         ]
-        model_config = {"model": DEEPSEEK_MODELS["chat"], "temperature": 0.85, "max_tokens": 200, "require_reasoning": False}
+
+        model_config = {
+            "model": DEEPSEEK_MODELS["chat"],
+            "temperature": 0.9,
+            "max_tokens": 220,
+            "require_reasoning": False,
+        }
+
         answer = await call_deepseek(messages, model_config)
-        text = clean_response(answer or f"Спокойной ночи, Максим... {season_info.get('emoji','🌙')}", is_maxim=True)
+
+        fallback = (
+            f"{moon['emoji']} День официально закончен.\n\n"
+            f"{moon_comment}\n"
+            f"Кто сегодня устал — тот хотя бы честен.\n\n"
+            f"Спокойной ночи всем."
+        )
+
+        text = clean_response(answer or fallback)
 
         await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+
     except Exception as e:
         logger.error(f"Ошибка вечернего сообщения: {e}", exc_info=True)
+
+    finally:
+        schedule_next_evening(context.job_queue)
+
 
 async def send_friday_tennis_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not GROUP_CHAT_ID:
         return
+
     try:
         message = (
             "🎾 *Пятничный теннис!*\n\n"
@@ -1086,13 +1654,62 @@ async def send_friday_tennis_reminder(context: ContextTypes.DEFAULT_TYPE) -> Non
             f"Действует до: {TENNIS_CODE_VALID_UNTIL}\n\n"
             "Увидимся на кортах! 😊"
         )
+
         await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message, parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"Ошибка теннисного напоминания: {e}", exc_info=True)
+
         try:
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🎾 Теннис в 16:30! Код: {TENNIS_ACCESS_CODE}")
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=f"🎾 Теннис в 16:30! Код: {TENNIS_ACCESS_CODE}",
+            )
         except Exception:
             pass
+
+
+# ========== RANDOM SCHEDULING ==========
+
+def random_time_between(start_hour: int, start_minute: int, end_hour: int, end_minute: int) -> time:
+    start_total = start_hour * 60 + start_minute
+    end_total = end_hour * 60 + end_minute
+    picked = random.randint(start_total, end_total)
+
+    return time(hour=picked // 60, minute=picked % 60)
+
+
+def schedule_once_at_local_time(job_queue, callback, target_time: time, name: str):
+    tz = get_tz()
+    now = datetime.now(tz)
+
+    target = tz.localize(
+        datetime.combine(now.date(), target_time.replace(tzinfo=None))
+    )
+
+    if target <= now:
+        target = target + timedelta(days=1)
+
+    delay = max(1, int((target - now).total_seconds()))
+
+    for job in job_queue.jobs():
+        if job.name == name:
+            job.schedule_removal()
+
+    job_queue.run_once(callback, when=delay, name=name)
+
+    logger.info(f"⏰ Запланировано {name}: {target.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+
+def schedule_next_morning(job_queue):
+    target_time = random_time_between(7, 0, 9, 0)
+    schedule_once_at_local_time(job_queue, send_morning_message, target_time, "random-morning")
+
+
+def schedule_next_evening(job_queue):
+    target_time = random_time_between(20, 0, 21, 30)
+    schedule_once_at_local_time(job_queue, send_evening_message, target_time, "random-evening")
+
 
 # ========== HANDLER ==========
 
@@ -1105,18 +1722,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = (msg.text or "").strip()
+
     if not text:
         return
 
     try:
         user_info = await get_or_create_user_info(update)
-        is_maxim = user_info.is_maxim()
 
-        # В личке отвечаем всегда, в группе — только Максиму или при обращении
-        should_respond = True
-        is_direct_address = True
+        memory_store.increment_user_message(user.id)
+        extract_topics_and_facts(user_info, text)
+        memory_store.add_message(
+            chat_id=chat.id,
+            user_id=user.id,
+            role="user",
+            name=user_info.get_display_name(),
+            content=text,
+        )
 
-        if chat.type in ("group", "supergroup"):
+        # Личка — всегда отвечает.
+        if chat.type == "private":
+            should_respond = True
+            is_direct_address = True
+        else:
             bot_username = (context.bot.username or "").lower()
             text_lower = text.lower()
 
@@ -1124,53 +1751,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mentioned_by_username = bool(bot_username) and f"@{bot_username}" in text_lower
 
             is_reply_to_bot = False
+
             if msg.reply_to_message and msg.reply_to_message.from_user:
-                # В группе иногда полезно: reply на сообщение бота
                 me = await context.bot.get_me()
-                is_reply_to_bot = (msg.reply_to_message.from_user.id == me.id)
+                is_reply_to_bot = msg.reply_to_message.from_user.id == me.id
 
             is_direct_address = mentioned_by_name or mentioned_by_username or is_reply_to_bot
-            should_respond = is_maxim or is_direct_address
 
-            if not should_respond:
-                return
+            if is_direct_address:
+                should_respond = True
+            else:
+                should_respond = random.random() < RANDOM_GROUP_REPLY_RATE
 
-            # лёгкая "естественность" только для Максима
-            if is_maxim and not is_direct_address:
-                if random.random() < 0.90:
-                    return
+        if not should_respond:
+            return
 
-        memory = get_conversation_memory(user.id, chat.id)
+        force_short = chat.type in ("group", "supergroup") and not is_direct_address
 
-        tz = get_tz()
-        now = datetime.now(tz)
-        _, time_desc = get_time_of_day(now)
-        season, _ = get_current_season()
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        except Exception:
+            pass
 
-        extra_context = {
-            "time_context": time_desc,
-            "season_context": f"Сейчас {season} в {BOT_LOCATION['city']}е",
-        }
-
-        if is_maxim and not is_direct_address:
-            reply, updated_memory = await generate_leila_response(text, user_info, memory, extra_context, force_short=True)
-            # дополнительно сжимаем
-            words = reply.split()
-            if len(words) > 20:
-                reply = " ".join(words[:15]) + "..."
+        if chat.type in ("group", "supergroup"):
+            await asyncio.sleep(random.uniform(1.5, 7.0))
         else:
-            reply, updated_memory = await generate_leila_response(text, user_info, memory, extra_context)
+            await asyncio.sleep(random.uniform(0.5, 2.0))
 
-        conversation_memories[get_memory_key(user.id, chat.id)] = updated_memory
+        reply = await generate_leila_response(
+            user_message=text,
+            user_info=user_info,
+            chat_id=chat.id,
+            force_short=force_short,
+        )
 
-        await context.bot.send_message(chat_id=chat.id, text=reply)
+        if force_short:
+            words = reply.split()
+            if len(words) > 28:
+                reply = " ".join(words[:24]) + "..."
+
+        memory_store.add_message(
+            chat_id=chat.id,
+            user_id=0,
+            role="assistant",
+            name="Лейла",
+            content=reply,
+        )
+
+        reply_as_thread = False
+
+        if chat.type in ("group", "supergroup"):
+            reply_as_thread = random.random() < 0.55
+
+        if reply_as_thread:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=reply,
+                reply_to_message_id=msg.message_id,
+            )
+        else:
+            await context.bot.send_message(chat_id=chat.id, text=reply)
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
+
         try:
-            await context.bot.send_message(chat_id=chat.id, text="Извини, что-то пошло не так. Попробуй ещё раз.")
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="Что-то пошло не так. Даже у меня бывают дни.",
+            )
         except Exception:
             pass
+
 
 # ========== MAIN ==========
 
@@ -1193,53 +1845,57 @@ def main() -> None:
     logger.info(f"💬 Группа ID: {GROUP_CHAT_ID}")
     logger.info(f"👤 Максим ID: {MAXIM_ID}")
     logger.info(f"🤖 DeepSeek доступен: {'✅' if client else '❌'}")
+    logger.info(f"🧠 SQLite память: {DB_PATH}")
     logger.info("=" * 60)
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    async def post_init(application):
+        if GROUP_CHAT_ID:
+            schedule_next_morning(application.job_queue)
+            schedule_next_evening(application.job_queue)
 
-    # handlers
+            await asyncio.sleep(2)
+
+            try:
+                tz_local = get_tz()
+                now_local = datetime.now(tz_local)
+                season_, season_info_ = get_current_season()
+
+                greetings = [
+                    f"💫 Лейла вернулась. Сейчас {now_local.strftime('%H:%M')} в Брисбене. {season_info_.get('emoji', '✨')}",
+                    f"Я снова тут. Ничего не трогайте, я сама всё осужу. {season_info_.get('emoji', '🌟')}",
+                    f"Лейла на месте. В {BOT_LOCATION['city']}е сейчас {season_}. Живём дальше.",
+                ]
+
+                await application.bot.send_message(
+                    chat_id=GROUP_CHAT_ID,
+                    text=random.choice(greetings),
+                )
+
+            except Exception as e:
+                logger.error(f"Ошибка post_init: {e}", exc_info=True)
+
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
     app.add_handler(CommandHandler("reset_memory", reset_memory))
     app.add_handler(CommandHandler("show_memory", show_memory))
+    app.add_handler(CommandHandler("remember", remember_command))
     app.add_handler(CommandHandler("moon", moon_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # ✅ корректный post_init (PTB v20+)
-    async def post_init(application):
-        if not GROUP_CHAT_ID:
-            return
-        await asyncio.sleep(2)
-        try:
-            tz_local = get_tz()
-            now_local = datetime.now(tz_local)
-            season_, season_info_ = get_current_season()
-            greetings = [
-                f"💫 Лейла вернулась! Сейчас {now_local.strftime('%H:%M')} в Брисбене. {season_info_.get('emoji','✨')}",
-                f"🌸 Снова с вами! В {BOT_LOCATION['city']}е сейчас {season_}. {season_info_.get('emoji','🌟')}",
-            ]
-            await application.bot.send_message(chat_id=GROUP_CHAT_ID, text=random.choice(greetings))
-        except Exception as e:
-            logger.error(f"Ошибка post_init: {e}", exc_info=True)
-
-    app.post_init = post_init
-
-    # scheduler
     jq = app.job_queue
     tz_obj = get_tz()
 
-    # чистим старые задачи
     for job in jq.jobs():
         job.schedule_removal()
 
-    # утро 08:30
-    jq.run_daily(send_morning_to_maxim, time=time(hour=8, minute=30, tzinfo=tz_obj), name="leila-morning")
-
-    # вечер 21:10
-    jq.run_daily(send_evening_to_maxim, time=time(hour=21, minute=10, tzinfo=tz_obj), name="leila-evening")
-
-    # ✅ пятница = 4 (Mon=0)
     jq.run_daily(
         send_friday_tennis_reminder,
         time=time(hour=16, minute=0, tzinfo=tz_obj),
@@ -1249,6 +1905,7 @@ def main() -> None:
 
     logger.info("🤖 Бот запущен!")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
