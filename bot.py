@@ -182,13 +182,16 @@ class MemoryStore:
 
     def _connect(self):
         return sqlite3.connect(
-        self.path,
-        check_same_thread=False,
-        timeout=30,
-    )
+            self.path,
+            check_same_thread=False,
+            timeout=30,
+        )
 
     def _init_db(self):
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+
             cur = conn.cursor()
 
             cur.execute("""
@@ -226,6 +229,14 @@ class MemoryStore:
                     name TEXT,
                     content TEXT,
                     created_at TEXT
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
             """)
 
@@ -339,34 +350,24 @@ class MemoryStore:
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (chat_id, user_id, role, name, content, now))
 
-            cur.execute("SELECT recent_messages_json FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            cur.execute("SELECT chat_id FROM chat_memory WHERE chat_id = ?", (chat_id,))
             row = cur.fetchone()
-            recent = json.loads(row[0]) if row and row[0] else []
-
-            recent.append({
-                "role": role,
-                "name": name,
-                "content": content,
-                "created_at": now,
-            })
-            recent = recent[-50:]
 
             if row:
                 cur.execute("""
                     UPDATE chat_memory
                     SET last_activity = ?,
-                        message_count = message_count + 1,
-                        recent_messages_json = ?
+                        message_count = message_count + 1
                     WHERE chat_id = ?
-                """, (now, json.dumps(recent, ensure_ascii=False), chat_id))
+                """, (now, chat_id))
             else:
                 cur.execute("""
                     INSERT INTO chat_memory (
                         chat_id, last_activity, message_count,
                         recent_messages_json, summary, inside_jokes_json
                     )
-                    VALUES (?, ?, 1, ?, '', '[]')
-                """, (chat_id, now, json.dumps(recent, ensure_ascii=False)))
+                    VALUES (?, ?, 1, '[]', '', '[]')
+                """, (chat_id, now))
 
             conn.commit()
 
@@ -403,27 +404,35 @@ class MemoryStore:
     def get_chat_context_text(self, chat_id: int) -> str:
         with self._connect() as conn:
             cur = conn.cursor()
+
             cur.execute("""
-                SELECT message_count, recent_messages_json, summary, inside_jokes_json
+                SELECT message_count, summary, inside_jokes_json
                 FROM chat_memory
                 WHERE chat_id = ?
             """, (chat_id,))
             row = cur.fetchone()
 
-        if not row:
+            cur.execute("""
+                SELECT role, name, content
+                FROM messages
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT 12
+            """, (chat_id,))
+            recent_rows = cur.fetchall()
+
+        if not row and not recent_rows:
             return ""
 
-        message_count, recent_json, summary, jokes_json = row
-        recent = json.loads(recent_json or "[]")
+        message_count = row[0] if row else 0
+        summary = row[1] if row else ""
+        jokes_json = row[2] if row else "[]"
         jokes = json.loads(jokes_json or "[]")
 
         last_lines = []
-        for msg in recent[-12:]:
-            name = msg.get("name", "Кто-то")
-            content = msg.get("content", "")
-            role = msg.get("role", "user")
+        for role, name, content in reversed(recent_rows):
             if role == "user":
-                last_lines.append(f"{name}: {content}")
+                last_lines.append(f"{name or 'Кто-то'}: {content}")
             else:
                 last_lines.append(f"Лейла: {content}")
 
@@ -475,6 +484,25 @@ class MemoryStore:
 
             conn.commit()
 
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cur.fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str):
+        now = datetime.now(pytz.UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+            """, (key, value, now))
+            conn.commit()
+
     def reset_chat_memory(self, chat_id: int):
         with self._connect() as conn:
             conn.execute("DELETE FROM chat_memory WHERE chat_id = ?", (chat_id,))
@@ -503,6 +531,9 @@ class MemoryStore:
 
 
 memory_store = MemoryStore(DB_PATH)
+
+TENNIS_ACCESS_CODE = memory_store.get_setting("tennis_access_code", TENNIS_ACCESS_CODE)
+TENNIS_CODE_VALID_UNTIL = memory_store.get_setting("tennis_code_valid_until", TENNIS_CODE_VALID_UNTIL)
 
 # ========== ДАТАКЛАССЫ ==========
 
@@ -1608,6 +1639,7 @@ async def set_tennis_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     TENNIS_ACCESS_CODE = code
+    memory_store.set_setting("tennis_access_code", code)
 
     await update.effective_message.reply_text(
         f"🎾 Новый теннисный код:\n{code}"
@@ -1632,6 +1664,7 @@ async def set_tennis_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     TENNIS_CODE_VALID_UNTIL = expiry
+    memory_store.set_setting("tennis_code_valid_until", expiry)
 
     await update.effective_message.reply_text(
         f"📅 Новая дата действия:\n{expiry}"
