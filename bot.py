@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import pytz
 import httpx
@@ -121,6 +121,57 @@ MOON_MOOD_COMMENTS = {
         "Энергия идёт на спад, так что героизм сегодня не обязателен.",
     ],
 }
+CURRENT_LEILA_STATE = {
+    "mood": "обычное",
+    "energy": 0.8,
+    "last_mood_change": datetime.now(pytz.UTC),
+}
+
+LEILA_STATE_VARIANTS = [
+    {"mood": "саркастичное", "energy": 0.9},
+    {"mood": "сонное", "energy": 0.25},
+    {"mood": "уставшее", "energy": 0.35},
+    {"mood": "ироничное", "energy": 0.75},
+    {"mood": "ленивое", "energy": 0.2},
+    {"mood": "разговорчивое", "energy": 1.0},
+]
+
+MICRO_REPLIES = [
+    "мда",
+    "ну бывает",
+    "это сильно",
+    "ладно",
+    "интересно конечно",
+    "я пока это переварю",
+    "вопросов стало больше",
+    "не хочу об этом думать",
+    "ну да. естественно",
+]
+
+SPONTANEOUS_MESSAGES = [
+    "Иногда мне кажется, что этот чат держится на сарказме и случайности.",
+    "Напоминаю: не каждый спор в интернете стоит вашего давления.",
+    "Я всё ещё считаю, что людям нельзя давать доступ в интернет до кофе.",
+    "Иногда лучший жизненный план — лечь спать.",
+    "Сегодня уровень взрослости у человечества опять под вопросом.",
+]
+
+def maybe_change_leila_state():
+
+    now = datetime.now(pytz.UTC)
+
+    elapsed = (
+        now - CURRENT_LEILA_STATE["last_mood_change"]
+    ).total_seconds()
+
+    if elapsed > random.randint(7200, 20000):
+
+        new_state = random.choice(LEILA_STATE_VARIANTS)
+
+        CURRENT_LEILA_STATE["mood"] = new_state["mood"]
+        CURRENT_LEILA_STATE["energy"] = new_state["energy"]
+        CURRENT_LEILA_STATE["last_mood_change"] = now
+
 
 # ========== SQLite MEMORY ==========
 
@@ -130,7 +181,11 @@ class MemoryStore:
         self._init_db()
 
     def _connect(self):
-        return sqlite3.connect(self.path)
+    return sqlite3.connect(
+        self.path,
+        check_same_thread=False,
+        timeout=30,
+    )
 
     def _init_db(self):
         with self._connect() as conn:
@@ -1246,23 +1301,29 @@ def clean_response(text: str) -> str:
 
 
 def maybe_add_maxim_context() -> str:
+
     if not MAXIM_ID:
         return ""
 
     return """
-Локальный мем про Максима:
-Иногда, редко и только к месту, можно слегка подшутить над Максимом:
-- он часто меняет мнение;
-- может уверенно рассуждать обо всём;
-- иногда ленится, пока его не подтолкнут;
-- любит выглядеть интеллигентом, который всё понял.
+Иногда в чате могут слегка шутить про Максима.
+
+Это редкий локальный мем, а не главная тема.
+
+Иногда можно мягко упомянуть:
+- что он любит звучать уверенно;
+- что может менять мнение;
+- что иногда ленится;
+- что иногда делает вид будто уже всё понял про жизнь.
 
 Но:
-- не делай Максима главной темой;
-- не упоминай его постоянно;
-- максимум примерно в 10-15% шуток;
-- это дружеский стёб, не травля.
-""".strip()
+- не делай это часто;
+- не фокусируйся на Максиме;
+- не превращай это в травлю;
+- не упоминай его без причины.
+"""
+
+
 
 
 def generate_system_prompt(
@@ -1309,6 +1370,16 @@ def generate_system_prompt(
 - не придумывай постоянные мемы без причины;
 - говори естественно, как обычный человек;
 - избегай сюрреалистичных сравнений;
+- иногда отвечай очень коротко;
+- иногда отвечай сухо;
+- иногда можешь проигнорировать часть сообщения;
+- иногда можешь быть ленивой;
+- не пытайся быть идеальной;
+- не всегда старайся помочь;
+- не веди себя как ассистент;
+- иногда можешь отвечать как человек, который устал читать чат;
+
+
 
 {maybe_add_maxim_context()}
 
@@ -1336,11 +1407,18 @@ async def generate_leila_response(
 
     model_config = analyze_query_complexity(user_message)
 
+    maybe_change_leila_state() 
+    
+    energy = CURRENT_LEILA_STATE["energy"] 
+    
+    if force_short and random.random() > max(0.45, energy):
+        return random.choice(MICRO_REPLIES)
+    
     if force_short:
         model_config["max_tokens"] = 80
         model_config["temperature"] = 0.85
 
-    mood = random.choice(LEILA_MOODS)
+    mood = CURRENT_LEILA_STATE["mood"]
     chat_context = memory_store.get_chat_context_text(chat_id)
     user_profile = memory_store.get_user_profile_text(user_info.id)
 
@@ -1511,6 +1589,53 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logger.error(f"Ошибка /remember: {e}", exc_info=True)
         await update.effective_message.reply_text("Не смогла запомнить.")
+
+async def set_tennis_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global TENNIS_ACCESS_CODE
+
+    user = update.effective_user
+
+    if not user or (ADMIN_ID and user.id != ADMIN_ID):
+        return
+
+    code = " ".join(context.args).strip()
+
+    if not code:
+        await update.effective_message.reply_text(
+            "Использование:\n/set_tennis_code 123456"
+        )
+        return
+
+    TENNIS_ACCESS_CODE = code
+
+    await update.effective_message.reply_text(
+        f"🎾 Новый теннисный код:\n{code}"
+    )
+
+
+async def set_tennis_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global TENNIS_CODE_VALID_UNTIL
+
+    user = update.effective_user
+
+    if not user or (ADMIN_ID and user.id != ADMIN_ID):
+        return
+
+    expiry = " ".join(context.args).strip()
+
+    if not expiry:
+        await update.effective_message.reply_text(
+            "Использование:\n/set_tennis_expiry 20 августа 2026"
+        )
+        return
+
+    TENNIS_CODE_VALID_UNTIL = expiry
+
+    await update.effective_message.reply_text(
+        f"📅 Новая дата действия:\n{expiry}"
+    )
 
 
 # ========== DAILY MESSAGES ==========
@@ -1715,6 +1840,85 @@ def schedule_next_evening(job_queue):
     target_time = random_time_between(20, 0, 21, 30)
     schedule_once_at_local_time(job_queue, send_evening_message, target_time, "random-evening")
 
+# ========== DELAYED FOLLOWUPS ==========
+
+async def delayed_followup(context: ContextTypes.DEFAULT_TYPE):
+
+    data = context.job.data
+
+    try:
+
+        followups = [
+            "Я только сейчас поняла насколько это было странно.",
+            "Кстати… я всё ещё думаю об этом сообщении.",
+            "Ладно, перечитала ещё раз.",
+            "Это было сильнее, чем я сначала подумала.",
+        ]
+
+        await context.bot.send_message(
+            chat_id=data["chat_id"],
+            text=random.choice(followups),
+            reply_to_message_id=data["message_id"],
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка delayed followup: {e}")
+
+
+def maybe_schedule_followup(context, chat_id, message_id):
+
+    now_hour = datetime.now(get_tz()).hour
+
+    if 1 <= now_hour <= 8:
+        return
+
+    if random.random() < 0.035:
+
+        delay = random.randint(180, 2400)
+
+        context.job_queue.run_once(
+            delayed_followup,
+            when=delay,
+            data={
+                "chat_id": chat_id,
+                "message_id": message_id,
+            },
+        )
+
+
+async def spontaneous_chat_message(context: ContextTypes.DEFAULT_TYPE):
+
+    if not GROUP_CHAT_ID:
+        return
+
+    try:
+
+        text = random.choice(SPONTANEOUS_MESSAGES)
+
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=text,
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка spontaneous message: {e}")
+
+    finally:
+        schedule_spontaneous_message(context.job_queue)
+
+
+def schedule_spontaneous_message(job_queue):
+
+    target_time = random_time_between(11, 0, 22, 30)
+
+    schedule_once_at_local_time(
+        job_queue,
+        spontaneous_chat_message,
+        target_time,
+        "spontaneous-message",
+    )
+
+
 
 # ========== HANDLER ==========
 
@@ -1815,7 +2019,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_to_message_id=msg.message_id,
             )
         else:
-            await context.bot.send_message(chat_id=chat.id, text=reply)
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=reply,
+            )
+
+        maybe_schedule_followup(
+            context,
+            chat.id,
+            msg.message_id,
+        )
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
@@ -1857,7 +2070,8 @@ def main() -> None:
         if GROUP_CHAT_ID:
             schedule_next_morning(application.job_queue)
             schedule_next_evening(application.job_queue)
-
+            schedule_spontaneous_message(application.job_queue)
+            
             await asyncio.sleep(2)
 
             try:
@@ -1894,6 +2108,8 @@ def main() -> None:
     app.add_handler(CommandHandler("remember", remember_command))
     app.add_handler(CommandHandler("moon", moon_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("set_tennis_code", set_tennis_code))
+    app.add_handler(CommandHandler("set_tennis_expiry", set_tennis_expiry))
 
     jq = app.job_queue
     tz_obj = get_tz()
