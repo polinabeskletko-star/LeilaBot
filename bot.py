@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-# ========== ЛОГИРОВАНИЕ ==========
+# ========== LOGGING ==========
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== НАСТРОЙКИ ==========
+# ========== SETTINGS ==========
 
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN", "")
 
@@ -90,6 +90,10 @@ DB_PATH = os.getenv("LEILA_DB_PATH", "leila_memory.sqlite3")
 RANDOM_GROUP_REPLY_RATE = float(os.getenv("RANDOM_GROUP_REPLY_RATE", "0.15"))
 MAXIM_JOKE_RATE = float(os.getenv("MAXIM_JOKE_RATE", "0.12"))
 
+SPONTANEOUS_MESSAGE_ENABLED = os.getenv("SPONTANEOUS_MESSAGE_ENABLED", "1") == "1"
+SPONTANEOUS_MIN_HOUR = int(os.getenv("SPONTANEOUS_MIN_HOUR", "11"))
+SPONTANEOUS_MAX_HOUR = int(os.getenv("SPONTANEOUS_MAX_HOUR", "22"))
+
 LEILA_MOODS = [
     "обычное",
     "саркастичное",
@@ -99,28 +103,6 @@ LEILA_MOODS = [
     "ироничное",
 ]
 
-MOON_MOOD_COMMENTS = {
-    "новолуние": [
-        "Хороший день, чтобы начать что-то новое. Или хотя бы сделать вид.",
-        "Энергии может быть мало, зато поводов драматизировать — достаточно.",
-        "Сегодня лучше не требовать от людей чудес. Особенно до кофе.",
-    ],
-    "растущая": [
-        "День подходит для планов, роста и красивых обещаний самому себе.",
-        "Можно начинать дела. Даже те, которые потом героически бросите.",
-        "Энергия растёт. Главное — не потратить её на спор в интернете.",
-    ],
-    "полнолуние": [
-        "Сегодня люди могут быть особенно странными. Но не всё надо списывать на Луну.",
-        "Эмоции могут быть громче обычного. Берегите себя и чужие нервы.",
-        "Если кто-то сегодня слишком уверен в своей правоте — дышим глубже.",
-    ],
-    "убывающая": [
-        "Хороший день, чтобы завершать старое и отпускать лишнее.",
-        "Можно разгрести хвосты. Хотя бы морально.",
-        "Энергия идёт на спад, так что героизм сегодня не обязателен.",
-    ],
-}
 CURRENT_LEILA_STATE = {
     "mood": "обычное",
     "energy": 0.8,
@@ -148,32 +130,52 @@ MICRO_REPLIES = [
     "ну да. естественно",
 ]
 
-SPONTANEOUS_MESSAGES = [
-    "Иногда мне кажется, что этот чат держится на сарказме и случайности.",
-    "Напоминаю: не каждый спор в интернете стоит вашего давления.",
-    "Я всё ещё считаю, что людям нельзя давать доступ в интернет до кофе.",
-    "Иногда лучший жизненный план — лечь спать.",
-    "Сегодня уровень взрослости у человечества опять под вопросом.",
+# Только аварийный fallback, если DeepSeek недоступен.
+# Больше не используется как основной источник дневных сообщений.
+SPONTANEOUS_FALLBACK_MESSAGES = [
+    "Я просто молча наблюдала и решила, что человечество сегодня опять в тестовом режиме.",
+    "Иногда чат выглядит как эксперимент, который никто не согласовывал.",
+    "Ладно, продолжайте. Я пока делаю вид, что это всё нормально.",
+    "Уровень происходящего принят. Не одобрен, но принят.",
+    "Я ничего не говорю, но внутренне уже составила отчёт.",
 ]
 
+MOON_MOOD_COMMENTS = {
+    "новолуние": [
+        "Хороший день, чтобы начать что-то новое. Или хотя бы сделать вид.",
+        "Энергии может быть мало, зато поводов драматизировать — достаточно.",
+        "Сегодня лучше не требовать от людей чудес. Особенно до кофе.",
+    ],
+    "растущая": [
+        "День подходит для планов, роста и красивых обещаний самому себе.",
+        "Можно начинать дела. Даже те, которые потом героически бросите.",
+        "Энергия растёт. Главное — не потратить её на спор в интернете.",
+    ],
+    "полнолуние": [
+        "Сегодня люди могут быть особенно странными. Но не всё надо списывать на Луну.",
+        "Эмоции могут быть громче обычного. Берегите себя и чужие нервы.",
+        "Если кто-то сегодня слишком уверен в своей правоте — дышим глубже.",
+    ],
+    "убывающая": [
+        "Хороший день, чтобы завершать старое и отпускать лишнее.",
+        "Можно разгрести хвосты. Хотя бы морально.",
+        "Энергия идёт на спад, так что героизм сегодня не обязателен.",
+    ],
+}
+
+
 def maybe_change_leila_state():
-
     now = datetime.now(pytz.UTC)
-
-    elapsed = (
-        now - CURRENT_LEILA_STATE["last_mood_change"]
-    ).total_seconds()
+    elapsed = (now - CURRENT_LEILA_STATE["last_mood_change"]).total_seconds()
 
     if elapsed > random.randint(7200, 20000):
-
         new_state = random.choice(LEILA_STATE_VARIANTS)
-
         CURRENT_LEILA_STATE["mood"] = new_state["mood"]
         CURRENT_LEILA_STATE["energy"] = new_state["energy"]
         CURRENT_LEILA_STATE["last_mood_change"] = now
 
 
-# ========== SQLite MEMORY ==========
+# ========== SQLITE MEMORY ==========
 
 class MemoryStore:
     def __init__(self, path: str):
@@ -182,10 +184,10 @@ class MemoryStore:
 
     def _connect(self):
         return sqlite3.connect(
-           self.path,
-           check_same_thread=False,
-           timeout=30,
-    )
+            self.path,
+            check_same_thread=False,
+            timeout=30,
+        )
 
     def _init_db(self):
         with self._connect() as conn:
@@ -247,7 +249,10 @@ class MemoryStore:
 
         with self._connect() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT user_id, message_count FROM users WHERE user_id = ?", (user_info.id,))
+            cur.execute(
+                "SELECT user_id FROM users WHERE user_id = ?",
+                (user_info.id,),
+            )
             existing = cur.fetchone()
 
             if existing:
@@ -401,7 +406,7 @@ class MemoryStore:
 
         return "\n".join(parts)
 
-    def get_chat_context_text(self, chat_id: int) -> str:
+    def get_chat_context_text(self, chat_id: int, limit: int = 12) -> str:
         with self._connect() as conn:
             cur = conn.cursor()
 
@@ -417,8 +422,8 @@ class MemoryStore:
                 FROM messages
                 WHERE chat_id = ?
                 ORDER BY id DESC
-                LIMIT 12
-            """, (chat_id,))
+                LIMIT ?
+            """, (chat_id, limit))
             recent_rows = cur.fetchall()
 
         if not row and not recent_rows:
@@ -529,13 +534,31 @@ class MemoryStore:
             f"🧠 Локальных мемов: {len(jokes)}"
         )
 
+    def get_recent_spontaneous_messages(self) -> List[str]:
+        raw = self.get_setting("recent_spontaneous_messages_json", "[]")
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def remember_spontaneous_message(self, text: str):
+        recent = self.get_recent_spontaneous_messages()
+        recent.append(text.strip())
+        recent = [x for x in recent if x][-20:]
+        self.set_setting(
+            "recent_spontaneous_messages_json",
+            json.dumps(recent, ensure_ascii=False),
+        )
+
 
 memory_store = MemoryStore(DB_PATH)
 
 TENNIS_ACCESS_CODE = memory_store.get_setting("tennis_access_code", TENNIS_ACCESS_CODE)
 TENNIS_CODE_VALID_UNTIL = memory_store.get_setting("tennis_code_valid_until", TENNIS_CODE_VALID_UNTIL)
 
-# ========== ДАТАКЛАССЫ ==========
+
+# ========== DATACLASSES ==========
 
 @dataclass
 class UserInfo:
@@ -573,15 +596,6 @@ class UserInfo:
                 self.gender = "male"
                 return
 
-    def get_display_name(self) -> str:
-        if self.first_name:
-            return self.first_name
-        if self.username:
-            return f"@{self.username}"
-        if self.full_name:
-            return self.full_name
-        return "Пользователь"
-
     @property
     def full_name(self) -> str:
         parts = []
@@ -591,11 +605,14 @@ class UserInfo:
             parts.append(self.last_name)
         return " ".join(parts) if parts else ""
 
-    def add_topic(self, topic: str):
-        if topic not in self.conversation_topics:
-            self.conversation_topics.append(topic)
-            if len(self.conversation_topics) > 10:
-                self.conversation_topics = self.conversation_topics[-10:]
+    def get_display_name(self) -> str:
+        if self.first_name:
+            return self.first_name
+        if self.username:
+            return f"@{self.username}"
+        if self.full_name:
+            return self.full_name
+        return "Пользователь"
 
     def is_maxim(self) -> bool:
         return self.id == MAXIM_ID
@@ -624,11 +641,8 @@ class ConversationMemory:
         if len(self.messages) > 50:
             self.messages = self.messages[-30:]
 
-    def get_recent_messages(self, count: int = 15) -> List[Dict[str, str]]:
-        return self.messages[-count:] if self.messages else []
 
-
-# ========== ГЛОБАЛЫ ==========
+# ========== GLOBALS ==========
 
 user_cache: Dict[int, UserInfo] = {}
 conversation_memories: Dict[str, ConversationMemory] = {}
@@ -641,7 +655,7 @@ else:
     logger.warning("❌ DEEPSEEK_API_KEY не задан")
 
 
-# ========== ВРЕМЯ/СЕЗОН ==========
+# ========== TIME / LOCATION ==========
 
 def get_tz() -> pytz.timezone:
     return pytz.timezone(BOT_TZ)
@@ -718,7 +732,7 @@ def get_australian_context() -> str:
 """.strip()
 
 
-# ========== ЛУНА ==========
+# ========== MOON ==========
 
 SYNODIC_MONTH = 29.530588853
 
@@ -777,26 +791,16 @@ def format_moon_phrase(moon: Dict[str, Any]) -> str:
     )
 
 
-async def moon_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        tz = get_tz()
-        now_local = datetime.now(tz)
-        moon = get_moon_phase(now_local)
-
-        msg = (
-            f"Сегодня в {BOT_LOCATION['city']}е:\n"
-            f"{format_moon_phrase(moon)}\n"
-            f"Возраст: {moon['age_days']} суток"
-        )
-
-        await update.effective_message.reply_text(msg)
-
-    except Exception as e:
-        logger.error(f"Ошибка /moon: {e}", exc_info=True)
-        await update.effective_message.reply_text("Не смогла посчитать фазу Луны 😔")
+def get_moon_comment(moon: Dict[str, Any]) -> str:
+    phase = moon["phase"]
+    comments = MOON_MOOD_COMMENTS.get(
+        phase,
+        ["Луна сегодня молчит, но явно что-то знает."],
+    )
+    return random.choice(comments)
 
 
-# ========== ПОГОДА ==========
+# ========== WEATHER ==========
 
 class WeatherService:
     def __init__(self):
@@ -871,33 +875,28 @@ class WeatherService:
             "ясн",
             "пасмурн",
             "шторм",
-            "гроз",
-            "туман",
-            "град",
-            "метео",
-            "прогноз",
-            "синоптик",
         ]
 
     def extract_city_from_text(self, text: str) -> Optional[str]:
         text_lower = text.lower()
 
-        for city_alias, city_query in self.city_aliases.items():
-            if city_alias in text_lower:
-                return city_query
+        for alias, city in self.city_aliases.items():
+            if alias in text_lower:
+                return city
 
         patterns = [
-            r"(?:в|во|на|у|около)\s+([а-яa-z\-]+(?:\s+[а-яa-z\-]+)?)",
-            r"погода\s+(?:в|во|на|у)?\s*([а-яa-z\-]+(?:\s+[а-яa-z\-]+)?)",
-            r"([а-яa-z\-]+(?:\s+[а-яa-z\-]+)?)\s+(?:погода|температура)",
+            r"погода\s+в\s+([а-яa-zё\-\s]+)",
+            r"температура\s+в\s+([а-яa-zё\-\s]+)",
+            r"сколько\s+градусов\s+в\s+([а-яa-zё\-\s]+)",
         ]
 
         for pattern in patterns:
             match = re.search(pattern, text_lower)
             if match:
-                potential_city = match.group(1).strip()
-                if potential_city not in ["нас", "вас", "себя", "мне", "тебе", "него", "неё"]:
-                    return potential_city
+                city = match.group(1).strip()
+                city = re.sub(r"[?.!,]+$", "", city).strip()
+                if city:
+                    return self.city_aliases.get(city, city)
 
         return None
 
@@ -1316,12 +1315,15 @@ def extract_topics_and_facts(user_info: UserInfo, text: str):
 
 
 def clean_response(text: str) -> str:
+    text = text.strip()
     text = re.sub(r"\s+", " ", text).strip()
 
     bad_prefixes = [
         "Как AI",
         "Я как искусственный интеллект",
         "Как языковая модель",
+        "As an AI",
+        "As a language model",
     ]
 
     for prefix in bad_prefixes:
@@ -1332,7 +1334,6 @@ def clean_response(text: str) -> str:
 
 
 def maybe_add_maxim_context() -> str:
-
     if not MAXIM_ID:
         return ""
 
@@ -1353,8 +1354,6 @@ def maybe_add_maxim_context() -> str:
 - не превращай это в травлю;
 - не упоминай его без причины.
 """
-
-
 
 
 def generate_system_prompt(
@@ -1395,22 +1394,16 @@ def generate_system_prompt(
 - не называй себя AI;
 - не упоминай погоду без явного вопроса;
 - можешь использовать 0-2 эмодзи;
-- иногда можно ответить сухо, лениво или с сарказмом.
+- иногда можно ответить сухо, лениво или с сарказмом;
 - не используй случайные абсурдные образы повторно;
 - не зацикливайся на одной шутке;
 - не придумывай постоянные мемы без причины;
 - говори естественно, как обычный человек;
 - избегай сюрреалистичных сравнений;
-- иногда отвечай очень коротко;
-- иногда отвечай сухо;
 - иногда можешь проигнорировать часть сообщения;
-- иногда можешь быть ленивой;
-- не пытайся быть идеальной;
 - не всегда старайся помочь;
 - не веди себя как ассистент;
-- иногда можешь отвечать как человек, который устал читать чат;
-
-
+- иногда можешь отвечать как человек, который устал читать чат.
 
 {maybe_add_maxim_context()}
 
@@ -1438,13 +1431,13 @@ async def generate_leila_response(
 
     model_config = analyze_query_complexity(user_message)
 
-    maybe_change_leila_state() 
-    
-    energy = CURRENT_LEILA_STATE["energy"] 
-    
+    maybe_change_leila_state()
+
+    energy = CURRENT_LEILA_STATE["energy"]
+
     if force_short and random.random() > max(0.45, energy):
         return random.choice(MICRO_REPLIES)
-    
+
     if force_short:
         model_config["max_tokens"] = 80
         model_config["temperature"] = 0.85
@@ -1479,6 +1472,104 @@ async def generate_leila_response(
         ])
 
     return clean_response(answer)
+
+
+# ========== GENERATED SPONTANEOUS MESSAGES ==========
+
+async def generate_spontaneous_message() -> str:
+    """
+    Генерирует свежее случайное сообщение Лейлы.
+    Старые canned messages больше не ротируются.
+    Они остались только как fallback, если DeepSeek недоступен.
+    """
+    if not client:
+        return random.choice(SPONTANEOUS_FALLBACK_MESSAGES)
+
+    maybe_change_leila_state()
+
+    tz = get_tz()
+    now_local = datetime.now(tz)
+    season, season_info = get_current_season()
+    time_of_day, _ = get_time_of_day(now_local)
+
+    mood = CURRENT_LEILA_STATE["mood"]
+    energy = CURRENT_LEILA_STATE["energy"]
+
+    chat_context = memory_store.get_chat_context_text(GROUP_CHAT_ID, limit=16)
+    recent_spontaneous = memory_store.get_recent_spontaneous_messages()
+
+    prompt = f"""
+Создай ОДНО спонтанное сообщение от Лейлы в общий Telegram-чат.
+
+Это не ответ конкретному человеку.
+Это должна быть короткая мысль, которую живой участник чата мог внезапно написать сам по себе.
+
+Контекст:
+- Сейчас {now_local.strftime('%H:%M')} в Брисбене.
+- Сейчас {time_of_day}.
+- Сезон: {season} ({season_info.get('description', '')}).
+- Настроение Лейлы: {mood}.
+- Энергия Лейлы: {energy}.
+
+Недавний контекст чата:
+{chat_context or "Пока мало свежего контекста."}
+
+Последние спонтанные сообщения Лейлы, которые нельзя повторять и нельзя перефразировать близко:
+{json.dumps(recent_spontaneous[-12:], ensure_ascii=False, indent=2)}
+
+Запрещённые старые canned-темы:
+- человечеству нельзя давать интернет до кофе;
+- чат держится на сарказме и случайности;
+- не каждый спор стоит давления;
+- лучший план — лечь спать;
+- уровень взрослости человечества под вопросом.
+
+Правила:
+- 1-3 коротких предложения.
+- Русский язык.
+- Разговорный стиль.
+- Лёгкий сарказм можно, но без однотипной философии.
+- Не здоровайся.
+- Не пиши объявление.
+- Не задавай вопрос каждый раз.
+- Не упоминай, что ты бот, AI или помощник.
+- Не обращайся к конкретному человеку напрямую.
+- Не цитируй сообщения из чата.
+- Не упоминай погоду, Луну или Максима без естественной причины.
+- Сообщение должно выглядеть так, будто Лейла молча читала чат и внезапно решила вставить мысль.
+""".strip()
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — Лейла. Пиши как живой участник Telegram-чата: "
+                "коротко, естественно, саркастично, без ассистентского тона."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    model_config = {
+        "model": DEEPSEEK_MODELS["chat"],
+        "temperature": 1.08,
+        "max_tokens": 120,
+        "require_reasoning": False,
+    }
+
+    answer = await call_deepseek(messages, model_config)
+    text = clean_response(answer or "")
+
+    if not text:
+        text = random.choice(SPONTANEOUS_FALLBACK_MESSAGES)
+
+    # Защита от слишком длинных простыней
+    words = text.split()
+    if len(words) > 45:
+        text = " ".join(words[:42]) + "..."
+
+    memory_store.remember_spontaneous_message(text)
+    return text
 
 
 # ========== COMMANDS ==========
@@ -1546,6 +1637,25 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Ошибка при поиске в Википедии.")
 
 
+async def moon_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        tz = get_tz()
+        now_local = datetime.now(tz)
+        moon = get_moon_phase(now_local)
+
+        msg = (
+            f"Сегодня в {BOT_LOCATION['city']}е:\n"
+            f"{format_moon_phrase(moon)}\n"
+            f"Возраст: {moon['age_days']} суток"
+        )
+
+        await update.effective_message.reply_text(msg)
+
+    except Exception as e:
+        logger.error(f"Ошибка /moon: {e}", exc_info=True)
+        await update.effective_message.reply_text("Не смогла посчитать фазу Луны 😔")
+
+
 async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user = update.effective_user
@@ -1582,13 +1692,18 @@ async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         stats = memory_store.get_memory_stats(chat.id)
         context_text = memory_store.get_chat_context_text(chat.id)
+        recent_spontaneous = memory_store.get_recent_spontaneous_messages()
 
         response = f"📊 Память Лейлы\n\n{stats}"
 
         if context_text:
             response += "\n\nПоследний контекст:\n" + context_text[-2500:]
 
-        await update.effective_message.reply_text(response)
+        if recent_spontaneous:
+            response += "\n\nПоследние спонтанные сообщения:\n"
+            response += "\n".join(f"- {x}" for x in recent_spontaneous[-8:])
+
+        await update.effective_message.reply_text(response[:3900])
 
     except Exception as e:
         logger.error(f"Ошибка /show_memory: {e}", exc_info=True)
@@ -1621,8 +1736,8 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.error(f"Ошибка /remember: {e}", exc_info=True)
         await update.effective_message.reply_text("Не смогла запомнить.")
 
-async def set_tennis_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+async def set_tennis_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TENNIS_ACCESS_CODE
 
     user = update.effective_user
@@ -1647,7 +1762,6 @@ async def set_tennis_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_tennis_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     global TENNIS_CODE_VALID_UNTIL
 
     user = update.effective_user
@@ -1671,13 +1785,23 @@ async def set_tennis_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def spontaneous_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+
+        if not user or (ADMIN_ID and user.id != ADMIN_ID):
+            await update.effective_message.reply_text("Эта команда только для администратора.")
+            return
+
+        text = await generate_spontaneous_message()
+        await update.effective_message.reply_text(text)
+
+    except Exception as e:
+        logger.error(f"Ошибка /spontaneous_now: {e}", exc_info=True)
+        await update.effective_message.reply_text("Не смогла сгенерировать мысль. Бывает.")
+
+
 # ========== DAILY MESSAGES ==========
-
-def get_moon_comment(moon: Dict[str, Any]) -> str:
-    phase = moon["phase"]
-    comments = MOON_MOOD_COMMENTS.get(phase, ["Луна сегодня молчит, но явно что-то знает."])
-    return random.choice(comments)
-
 
 async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not GROUP_CHAT_ID:
@@ -1689,9 +1813,9 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
         moon = get_moon_phase(now_local)
         moon_text = format_moon_phrase(moon)
         moon_comment = get_moon_comment(moon)
-
         weather_data = await weather_service.get_weather("Brisbane,au")
         weather_text = weather_data["full_text"] if weather_data else ""
+        chat_context = memory_store.get_chat_context_text(GROUP_CHAT_ID, limit=10)
 
         prompt = f"""
 Создай короткое утреннее сообщение для общего Telegram-чата.
@@ -1701,6 +1825,7 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 - {moon_text}
 - Комментарий к Луне: {moon_comment}
 - Погода: {weather_text}
+- Недавний контекст чата: {chat_context or "мало контекста"}
 
 Стиль:
 - Лейла, русскоязычная женщина средних лет из Брисбена.
@@ -1710,7 +1835,8 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 - 3-5 предложений.
 - 1-3 эмодзи.
 - Не звучать как гороскоп из дешёвой газеты.
-"""
+- Не повторять одни и те же шутки про кофе.
+""".strip()
 
         messages = [
             {"role": "system", "content": "Ты — Лейла. Пиши как живой участник общего чата."},
@@ -1719,7 +1845,7 @@ async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         model_config = {
             "model": DEEPSEEK_MODELS["chat"],
-            "temperature": 0.72,
+            "temperature": 0.82,
             "max_tokens": 240,
             "require_reasoning": False,
         }
@@ -1754,6 +1880,7 @@ async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
         moon = get_moon_phase(now_local)
         moon_text = format_moon_phrase(moon)
         moon_comment = get_moon_comment(moon)
+        chat_context = memory_store.get_chat_context_text(GROUP_CHAT_ID, limit=10)
 
         prompt = f"""
 Создай короткое вечернее сообщение для общего Telegram-чата.
@@ -1762,6 +1889,7 @@ async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 - Сейчас вечер в Брисбене.
 - {moon_text}
 - Комментарий к Луне: {moon_comment}
+- Недавний контекст чата: {chat_context or "мало контекста"}
 
 Стиль:
 - Лейла, русскоязычная женщина средних лет из Брисбена.
@@ -1771,7 +1899,8 @@ async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 - Можно слегка пошутить про усталость, жизнь и людей.
 - 2-4 предложения.
 - 0-2 эмодзи.
-"""
+- Не повторять вчерашние формулировки.
+""".strip()
 
         messages = [
             {"role": "system", "content": "Ты — Лейла. Пиши как живой участник общего чата."},
@@ -1780,7 +1909,7 @@ async def send_evening_message(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         model_config = {
             "model": DEEPSEEK_MODELS["chat"],
-            "temperature": 0.78,
+            "temperature": 0.88,
             "max_tokens": 220,
             "require_reasoning": False,
         }
@@ -1873,24 +2002,55 @@ def schedule_next_evening(job_queue):
     target_time = random_time_between(20, 0, 21, 30)
     schedule_once_at_local_time(job_queue, send_evening_message, target_time, "random-evening")
 
+
 # ========== DELAYED FOLLOWUPS ==========
 
 async def delayed_followup(context: ContextTypes.DEFAULT_TYPE):
-
     data = context.job.data
 
     try:
+        chat_context = memory_store.get_chat_context_text(data["chat_id"], limit=8)
 
-        followups = [
-            "Я только сейчас поняла насколько это было странно.",
-            "Кстати… я всё ещё думаю об этом сообщении.",
-            "Ладно, перечитала ещё раз.",
-            "Это было сильнее, чем я сначала подумала.",
+        prompt = f"""
+Напиши короткий delayed follow-up от Лейлы в Telegram-чате.
+
+Контекст:
+{chat_context or "мало контекста"}
+
+Правила:
+- 1 короткое предложение.
+- Выглядит так, будто Лейла через время вспомнила прошлое сообщение.
+- Не повторяй одну и ту же фразу.
+- Не будь слишком странной.
+- Русский язык.
+""".strip()
+
+        messages = [
+            {"role": "system", "content": "Ты — Лейла. Пиши коротко и естественно."},
+            {"role": "user", "content": prompt},
         ]
+
+        model_config = {
+            "model": DEEPSEEK_MODELS["chat"],
+            "temperature": 0.95,
+            "max_tokens": 80,
+            "require_reasoning": False,
+        }
+
+        text = await call_deepseek(messages, model_config)
+        text = clean_response(text or "")
+
+        if not text:
+            text = random.choice([
+                "Я только сейчас поняла насколько это было странно.",
+                "Кстати… я всё ещё думаю об этом сообщении.",
+                "Ладно, перечитала ещё раз.",
+                "Это было сильнее, чем я сначала подумала.",
+            ])
 
         await context.bot.send_message(
             chat_id=data["chat_id"],
-            text=random.choice(followups),
+            text=text,
             reply_to_message_id=data["message_id"],
         )
 
@@ -1899,14 +2059,12 @@ async def delayed_followup(context: ContextTypes.DEFAULT_TYPE):
 
 
 def maybe_schedule_followup(context, chat_id, message_id):
-
     now_hour = datetime.now(get_tz()).hour
 
     if 1 <= now_hour <= 8:
         return
 
     if random.random() < 0.035:
-
         delay = random.randint(180, 2400)
 
         context.job_queue.run_once(
@@ -1919,14 +2077,14 @@ def maybe_schedule_followup(context, chat_id, message_id):
         )
 
 
-async def spontaneous_chat_message(context: ContextTypes.DEFAULT_TYPE):
+# ========== SPONTANEOUS SCHEDULING ==========
 
-    if not GROUP_CHAT_ID:
+async def spontaneous_chat_message(context: ContextTypes.DEFAULT_TYPE):
+    if not GROUP_CHAT_ID or not SPONTANEOUS_MESSAGE_ENABLED:
         return
 
     try:
-
-        text = random.choice(SPONTANEOUS_MESSAGES)
+        text = await generate_spontaneous_message()
 
         await context.bot.send_message(
             chat_id=GROUP_CHAT_ID,
@@ -1934,15 +2092,18 @@ async def spontaneous_chat_message(context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
-        logger.error(f"Ошибка spontaneous message: {e}")
+        logger.error(f"Ошибка spontaneous message: {e}", exc_info=True)
 
     finally:
         schedule_spontaneous_message(context.job_queue)
 
 
 def schedule_spontaneous_message(job_queue):
+    if not SPONTANEOUS_MESSAGE_ENABLED:
+        logger.info("Спонтанные сообщения отключены")
+        return
 
-    target_time = random_time_between(11, 0, 22, 30)
+    target_time = random_time_between(SPONTANEOUS_MIN_HOUR, 0, SPONTANEOUS_MAX_HOUR, 30)
 
     schedule_once_at_local_time(
         job_queue,
@@ -1950,7 +2111,6 @@ def schedule_spontaneous_message(job_queue):
         target_time,
         "spontaneous-message",
     )
-
 
 
 # ========== HANDLER ==========
@@ -1981,7 +2141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             content=text,
         )
 
-        # Личка — всегда отвечает.
+        # Private chat — always answer.
         if chat.type == "private":
             should_respond = True
             is_direct_address = True
@@ -2097,6 +2257,7 @@ def main() -> None:
     logger.info(f"👤 Максим ID: {MAXIM_ID}")
     logger.info(f"🤖 DeepSeek доступен: {'✅' if client else '❌'}")
     logger.info(f"🧠 SQLite память: {DB_PATH}")
+    logger.info(f"💬 Спонтанные сообщения: {'✅' if SPONTANEOUS_MESSAGE_ENABLED else '❌'}")
     logger.info("=" * 60)
 
     async def post_init(application):
@@ -2104,7 +2265,7 @@ def main() -> None:
             schedule_next_morning(application.job_queue)
             schedule_next_evening(application.job_queue)
             schedule_spontaneous_message(application.job_queue)
-            
+
             await asyncio.sleep(2)
 
             try:
@@ -2133,6 +2294,7 @@ def main() -> None:
         .build()
     )
 
+    # Commands first
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("wiki", wiki_command))
@@ -2140,9 +2302,12 @@ def main() -> None:
     app.add_handler(CommandHandler("show_memory", show_memory))
     app.add_handler(CommandHandler("remember", remember_command))
     app.add_handler(CommandHandler("moon", moon_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("set_tennis_code", set_tennis_code))
     app.add_handler(CommandHandler("set_tennis_expiry", set_tennis_expiry))
+    app.add_handler(CommandHandler("spontaneous_now", spontaneous_now_command))
+
+    # Generic text handler last
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     jq = app.job_queue
     tz_obj = get_tz()
